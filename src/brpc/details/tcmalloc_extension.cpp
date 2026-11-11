@@ -24,7 +24,7 @@
 namespace {
 typedef MallocExtension* (*GetInstanceFn)();
 static pthread_once_t g_get_instance_fn_once = PTHREAD_ONCE_INIT;
-static GetInstanceFn g_get_instance_fn = NULL;
+static GetInstanceFn g_get_instance_fn = nullptr;
 static void InitGetInstanceFn() {
     g_get_instance_fn = (GetInstanceFn)dlsym(
         RTLD_NEXT, "_ZN15MallocExtension8instanceEv");
@@ -32,7 +32,7 @@ static void InitGetInstanceFn() {
 } // namespace
 
 MallocExtension* BAIDU_WEAK MallocExtension::instance() {
-    // On fedora 26, this weak function is NOT overriden by the one in tcmalloc
+    // On fedora 26, this weak function is NOT overridden by the one in tcmalloc
     // which is dynamically linked.The same issue can't be re-produced in
     // Ubuntu and the exact cause is unknown yet. Using dlsym to get the
     // function works around the issue right now. Note that we can't use dlsym
@@ -43,16 +43,20 @@ MallocExtension* BAIDU_WEAK MallocExtension::instance() {
     if (g_get_instance_fn) {
         return g_get_instance_fn();
     }
-    return NULL;
+    return nullptr;
 }
 
 bool IsHeapProfilerEnabled() {
-    return MallocExtension::instance() != NULL;
+    return MallocExtension::instance() != nullptr;
+}
+
+bool IsTCMallocEnabled() {
+    return IsHeapProfilerEnabled();
 }
 
 static bool check_TCMALLOC_SAMPLE_PARAMETER() {
     char* str = getenv("TCMALLOC_SAMPLE_PARAMETER");
-    if (str == NULL) {
+    if (str == nullptr) {
         return false;
     }
     char* endptr;

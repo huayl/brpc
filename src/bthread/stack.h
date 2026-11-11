@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: Sun Sep  7 22:37:39 CST 2014
 
@@ -26,13 +26,20 @@
 #include <gflags/gflags.h>          // DECLARE_int32
 #include "bthread/types.h"
 #include "bthread/context.h"        // bthread_fcontext_t
+#include "butil/build_config.h"
+#include "butil/compiler_specific.h"
 #include "butil/object_pool.h"
+
+// Discarding the continuation would leak ASan's saved fake stack.
+#if defined(OS_LINUX) && !defined(BUTIL_USE_ASAN)
+#define BTHREAD_STACK_TRIM_SUPPORTED
+#endif
 
 namespace bthread {
 
 struct StackStorage {
-     int stacksize;
-     int guardsize;
+     unsigned stacksize;
+     unsigned guardsize;
     // Assume stack grows upwards.
     // http://www.boost.org/doc/libs/1_55_0/libs/context/doc/html/context/stack.html
     void* bottom;
@@ -42,7 +49,7 @@ struct StackStorage {
     void zeroize() {
         stacksize = 0;
         guardsize = 0;
-        bottom = NULL;
+        bottom = nullptr;
         valgrind_stack_id = 0;
     }
 };
@@ -53,6 +60,13 @@ int allocate_stack_storage(StackStorage* s, int stacksize, int guardsize);
 // corresponding allocate_stack_storage() otherwise behavior is undefined.
 void deallocate_stack_storage(StackStorage* s);
 
+#if defined(BTHREAD_STACK_TRIM_SUPPORTED)
+namespace internal {
+// Called from TaskControl::init, never during command-line parsing.
+void init_stack_trimming();
+}
+#endif
+
 enum StackType {
     STACK_TYPE_MAIN = 0,
     STACK_TYPE_PTHREAD = BTHREAD_STACKTYPE_PTHREAD,
@@ -62,6 +76,7 @@ enum StackType {
 };
 
 struct ContextualStack {
+    virtual ~ContextualStack() = default;
     bthread_fcontext_t context;
     StackType stacktype;
     StackStorage storage;
@@ -70,7 +85,7 @@ struct ContextualStack {
 // Get a stack in the `type' and run `entry' at the first time that the
 // stack is jumped.
 ContextualStack* get_stack(StackType type, void (*entry)(intptr_t));
-// Recycle a stack. NULL does nothing.
+// Recycle a stack. nullptr does nothing.
 void return_stack(ContextualStack*);
 // Jump from stack `from' to stack `to'. `from' must be the stack of callsite
 // (to save contexts before jumping)

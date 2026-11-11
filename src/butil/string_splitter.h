@@ -65,7 +65,7 @@ public:
     inline StringSplitter(const char* input, char separator,
                           EmptyFieldAction action = SKIP_EMPTY_FIELD);
     // Allows containing embedded '\0' characters and separator can be '\0',
-    // if str_end is not NULL.
+    // if str_end is not nullptr.
     inline StringSplitter(const char* str_begin, const char* str_end,
                           char separator,
                           EmptyFieldAction action = SKIP_EMPTY_FIELD);
@@ -88,7 +88,7 @@ public:
 
     // Cast field to specific type, and write the value into `pv'.
     // Returns 0 on success, -1 otherwise.
-    // NOTE: If separator is a digit, casting functions always return -1.
+    // Only the bytes in the current field are converted.
     inline int to_int8(int8_t *pv) const;
     inline int to_uint8(uint8_t *pv) const;
     inline int to_int(int *pv) const;
@@ -122,7 +122,7 @@ public:
     //       longer than this utility.
     inline StringMultiSplitter(const char* input, const char* separators,
                                EmptyFieldAction action = SKIP_EMPTY_FIELD);
-    // Allows containing embedded '\0' characters if str_end is not NULL.
+    // Allows containing embedded '\0' characters if str_end is not nullptr.
     // NOTE: `separators` cannot contain embedded '\0' character.
     inline StringMultiSplitter(const char* str_begin, const char* str_end,
                                const char* separators,
@@ -143,7 +143,7 @@ public:
 
     // Cast field to specific type, and write the value into `pv'.
     // Returns 0 on success, -1 otherwise.
-    // NOTE: If separators contains digit, casting functions always return -1.
+    // Only the bytes in the current field are converted.
     inline int to_int8(int8_t *pv) const;
     inline int to_uint8(uint8_t *pv) const;
     inline int to_int(int *pv) const;
@@ -191,7 +191,7 @@ public:
     inline KeyValuePairsSplitter(const char* str_begin,
                                  char pair_delimiter,
                                  char key_value_delimiter)
-        : KeyValuePairsSplitter(str_begin, NULL,
+        : KeyValuePairsSplitter(str_begin, nullptr,
                 pair_delimiter, key_value_delimiter) {}
 
     inline KeyValuePairsSplitter(const StringPiece &sp,

@@ -1,4 +1,6 @@
-[bthread](https://github.com/brpc/brpc/tree/master/src/bthread)是brpc使用的M:N线程库，目的是在提高程序的并发度的同时，降低编码难度，并在核数日益增多的CPU上提供更好的scalability和cache locality。”M:N“是指M个bthread会映射至N个pthread，一般M远大于N。由于linux当下的pthread实现([NPTL](http://en.wikipedia.org/wiki/Native_POSIX_Thread_Library))是1:1的，M个bthread也相当于映射至N个[LWP](http://en.wikipedia.org/wiki/Light-weight_process)。bthread的前身是Distributed Process(DP)中的fiber，一个N:1的合作式线程库，等价于event-loop库，但写的是同步代码。
+[English version](../en/bthread.md)
+
+[bthread](https://github.com/apache/brpc/tree/master/src/bthread)是brpc使用的M:N线程库，目的是在提高程序的并发度的同时，降低编码难度，并在核数日益增多的CPU上提供更好的scalability和cache locality。”M:N“是指M个bthread会映射至N个pthread，一般M远大于N。由于linux当下的pthread实现([NPTL](http://en.wikipedia.org/wiki/Native_POSIX_Thread_Library))是1:1的，M个bthread也相当于映射至N个[LWP](http://en.wikipedia.org/wiki/Light-weight_process)。bthread的前身是Distributed Process(DP)中的fiber，一个N:1的合作式线程库，等价于event-loop库，但写的是同步代码。
 
 # Goals
 
@@ -47,7 +49,7 @@ pthread worker在任何时间只会运行一个bthread，当前bthread挂起时�
 ##### Q：若有大量的bthread调用了阻塞的pthread或系统函数，会影响RPC运行么？
 
 会。比如有8个pthread worker，当有8个bthread都调用了系统usleep()后，处理网络收发的RPC代码就暂时无法运行了。只要阻塞时间不太长, 这一般**没什么影响**, 毕竟worker都用完了, 除了排队也没有什么好方法.
-在brpc中用户可以选择调大worker数来缓解问题, 在server端可设置[ServerOptions.num_threads](server.md#worker线程数)或[-bthread_concurrency](http://brpc.baidu.com:8765/flags/bthread_concurrency), 在client端可设置[-bthread_concurrency](http://brpc.baidu.com:8765/flags/bthread_concurrency).
+在brpc中用户可以选择调大worker数来缓解问题, 在server端可设置[ServerOptions.num_threads](server.md#worker线程数)或[-bthread_concurrency](http://localhost:8765/flags/bthread_concurrency), 在client端可设置[-bthread_concurrency](http://localhost:8765/flags/bthread_concurrency).
 
 那有没有完全规避的方法呢?
 

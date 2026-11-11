@@ -30,16 +30,18 @@ static void* PeriodicTaskThread(void* arg) {
     timespec abstime;
     if (!task->OnTriggeringTask(&abstime)) { // end
         task->OnDestroyingTask();
-        return NULL;
+        return nullptr;
     }
     PeriodicTaskManager::StartTaskAt(task, abstime);
-    return NULL;
+    return nullptr;
 }
 
 static void RunPeriodicTaskThread(void* arg) {
     bthread_t th = 0;
+    bthread_attr_t attr = BTHREAD_ATTR_NORMAL;
+    bthread_attr_set_name(&attr, "PeriodicTaskThread");
     int rc = bthread_start_background(
-        &th, &BTHREAD_ATTR_NORMAL, PeriodicTaskThread, arg);
+        &th, &attr, PeriodicTaskThread, arg);
     if (rc != 0) {
         LOG(ERROR) << "Fail to start PeriodicTaskThread";
         static_cast<PeriodicTask*>(arg)->OnDestroyingTask();
@@ -48,7 +50,7 @@ static void RunPeriodicTaskThread(void* arg) {
 }
 
 void PeriodicTaskManager::StartTaskAt(PeriodicTask* task, const timespec& abstime) {
-    if (task == NULL) {
+    if (task == nullptr) {
         LOG(ERROR) << "Param[task] is NULL";
         return;
     }

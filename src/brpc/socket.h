@@ -23,6 +23,7 @@
 #include <deque>                               // std::deque
 #include <set>                                 // std::set
 #include "butil/atomicops.h"                    // butil::atomic
+#include "butil/containers/optional.h"          // butil::optional
 #include "bthread/types.h"                      // bthread_id_t
 #include "butil/iobuf.h"                        // butil::IOBuf, IOPortal
 #include "butil/macros.h"                       // DISALLOW_COPY_AND_ASSIGN
@@ -38,6 +39,12 @@
 #include "brpc/socket_id.h"               // SocketId
 #include "brpc/socket_message.h"          // SocketMessagePtr
 #include "bvar/bvar.h"
+#include "brpc/http_method.h"
+#include "brpc/event_dispatcher.h"
+#include "brpc/versioned_ref_with_id.h"
+#include "brpc/health_check_option.h"
+#include "brpc/socket_mode.h"
+#include "brpc/input_messenger_processor.h"  // InputMessengerProcessor
 
 namespace brpc {
 namespace policy {
@@ -48,11 +55,37 @@ class H2GlobalStreamCreator;
 namespace schan {
 class ChannelBalancer;
 }
+namespace rdma {
+class RdmaEndpoint;
+class RdmaConnect;
+class RdmaHandshakeClientV2;
+class RdmaHandshakeServerV2;
+class RdmaHandshakeClientV3;
+class RdmaHandshakeServerV3;
+}
+
+namespace urma {
+class UrmaEndpoint;
+class UrmaConnect;
+class UrmaHandshakeClientV2;
+class UrmaHandshakeServerV2;
+class UrmaHandshakeClientV3;
+class UrmaHandshakeServerV3;
+}
+
+namespace ubring {
+    class UBShmEndpoint;
+    class UBConnect;
+}
 
 class Socket;
 class AuthContext;
 class EventDispatcher;
 class Stream;
+class Transport;
+
+// Set SO_SNDBUF/SO_RCVBUF according to socket_*_buffer_size flags.
+void SetSocketBufferOptions(int fd);
 
 // A special closure for processing the about-to-recycle socket. Socket does
 // not delete SocketUser, if you want, `delete this' at the end of
@@ -60,7 +93,7 @@ class Stream;
 class SocketUser {
 public:
     virtual ~SocketUser() {}
-    virtual void BeforeRecycle(Socket*) {};
+    virtual void BeforeRecycle(Socket*) {}
 
     // Will be periodically called in a dedicated thread to check the
     // health.
@@ -153,53 +186,154 @@ struct PipelinedInfo {
     PipelinedInfo() { reset(); }
     void reset() {
         count = 0;
-        with_auth = false;
+        auth_flags = 0;
         id_wait = INVALID_BTHREAD_ID;
     }
     uint32_t count;
-    bool with_auth;
+    uint32_t auth_flags;
     bthread_id_t id_wait;
 };
+
+// A data structure packed with a pointer and
+// some extra information using a uint64 variable.
+template <class T>
+class PackedPtr {
+    static constexpr uint8_t MAX_POINTER_LEN = 48;
+    static constexpr uint64_t POINTER_MASK = ((uint64_t)1 << MAX_POINTER_LEN) - 1;
+    static constexpr uint64_t EXTRA_MASK = ~POINTER_MASK;
+public:
+    PackedPtr() : _data(0) {
+        BAIDU_CASSERT(sizeof(PackedPtr) == 8, sizeof_packed_ptr_must_be_8);
+    }
+
+    void set(T* ptr) {
+        // Clear the low 48 bits and then
+        // store the pointer in the low 48 bits.
+        _data = (_data & EXTRA_MASK) |
+                ((uint64_t)(uintptr_t)ptr & POINTER_MASK);
+    }
+
+    void reset() {
+        // Clear the low 48 bits.
+        _data &= EXTRA_MASK;
+    }
+
+    T* get() const { return (T*)(_data & POINTER_MASK); }
+
+    void set_extra(uint16_t extra) {
+        // Clear the high 16 bits and then
+        // store the extra in the high 16 bits.
+        _data = (_data & POINTER_MASK) |
+                ((uint64_t)extra << MAX_POINTER_LEN);
+    }
+
+    void reset_extra() {
+        // Clear the high 16 bits.
+        _data &= POINTER_MASK;
+    }
+
+    uint16_t extra() const { return _data >> MAX_POINTER_LEN; }
+
+    void set_ptr_and_extra(T* p, uint16_t extra) {
+        _data = ((uint64_t)(uintptr_t)p & POINTER_MASK) |
+                ((uint64_t)extra << MAX_POINTER_LEN);
+    }
+
+    void reset_ptr_and_extra() {
+        _data = 0;
+    }
+
+private:
+    // Pointer is stored in the low 48 bits,
+    // extra information is stored in the high 16 bits.
+    uint64_t _data;
+};
+
 
 struct SocketSSLContext {
     SocketSSLContext();
     ~SocketSSLContext();
 
-    SSL_CTX* raw_ctx;           // owned
-    std::string sni_name;       // useful for clients
+    SSL_CTX* raw_ctx;                        // owned
+    std::string sni_name;                    // useful for clients
+    std::vector<std::string> alpn_protocols; // useful for clients
+};
+
+struct SocketKeepaliveOptions {
+    // Start keeplives after this period.
+    int keepalive_idle_s{-1};
+    // Interval between keepalives.
+    int keepalive_interval_s{-1};
+    // Number of keepalives before death.
+    int keepalive_count{-1};
 };
 
 // TODO: Comment fields
 struct SocketOptions {
-    SocketOptions();
-
     // If `fd' is non-negative, set `fd' to be non-blocking and take the
     // ownership. Socket will close the fd(if needed) and call
     // user->BeforeRecycle() before recycling.
-    int fd;
+    int fd{-1};
     butil::EndPoint remote_side;
-    SocketUser* user;
+    // Client source address. For IPv4/IPv6, the port is ignored for binding
+    // and the OS allocates a source port. IPv4 IP_ANY disables explicit binding.
+    // Unix-domain addresses are preserved, including their paths.
+    butil::EndPoint local_side;
+    std::string device_name;
+    // If `connect_on_create' is true and `fd' is less than 0,
+    // a client connection will be established to remote_side()
+    // regarding deadline `connect_abstime' when Socket is being created.
+    // Default: false, means that a connection will be established
+    // on first write.
+    bool connect_on_create{false};
+    // Default: nullptr, means no timeout.
+    const timespec* connect_abstime{nullptr};
+    SocketUser* user{nullptr};
     // When *edge-triggered* events happen on the file descriptor, callback
     // `on_edge_triggered_events' will be called. Inside the callback, user
     // shall read fd() in non-blocking mode until all data has been read
     // or EAGAIN is met, otherwise the callback will not be called again
     // until new data arrives. The callback will not be called from more than
     // one thread at any time.
-    void (*on_edge_triggered_events)(Socket*);
-    int health_check_interval_s;
+    void (*on_edge_triggered_events)(Socket*){nullptr};
+    // Indicates that this socket requires an edge-triggered event handler even
+    // if `on_edge_triggered_events` is left as nullptr by the caller. When this
+    // flag is true and `on_edge_triggered_events` is nullptr, the underlying
+    // transport-specific implementation (e.g. a transport subclass) is allowed
+    // to install a suitable default `on_edge_triggered_events` callback on
+    // behalf of the user. Typical usage is by transports/protocols that rely
+    // on edge-triggered I/O semantics but want the framework to provide the
+    // actual event handler.
+    bool need_on_edge_trigger{false};
+    int health_check_interval_s{-1};
+    // Only accept ssl connection.
+    bool force_ssl{false};
     std::shared_ptr<SocketSSLContext> initial_ssl_ctx;
-    bthread_keytable_pool_t* keytable_pool;
-    SocketConnection* conn;
+    SocketMode socket_mode{SOCKET_MODE_TCP};
+    bthread_keytable_pool_t* keytable_pool{nullptr};
+    SocketConnection* conn{nullptr};
     std::shared_ptr<AppConnect> app_connect;
     // The created socket will set parsing_context with this value.
-    Destroyable* initial_parsing_context;
+    Destroyable* initial_parsing_context{nullptr};
+
+    // Socket keepalive related options.
+    // Refer to `SocketKeepaliveOptions' for details.
+    butil::optional<SocketKeepaliveOptions> keepalive_options;
+    // https://github.com/apache/brpc/issues/1154
+    // https://github.com/grpc/grpc/pull/16419/files
+    // Only linux supports TCP_USER_TIMEOUT.
+    int tcp_user_timeout_ms{ -1};
+    // Tag of this socket
+    bthread_tag_t bthread_tag{bthread_self_tag()};
+    HealthCheckOption hc_option;
 };
 
 // Abstractions on reading from and writing into file descriptors.
 // NOTE: accessed by multiple threads(frequently), align it by cacheline.
-class BAIDU_CACHELINE_ALIGNMENT/*note*/ Socket {
+class BAIDU_CACHELINE_ALIGNMENT/*note*/ Socket : public VersionedRefWithId<Socket> {
 friend class EventDispatcher;
 friend class InputMessenger;
+friend class InputMessengerProcessor;
 friend class Acceptor;
 friend class ConnectionsService;
 friend class SocketUser;
@@ -208,19 +342,41 @@ friend class Controller;
 friend class policy::ConsistentHashingLoadBalancer;
 friend class policy::RtmpContext;
 friend class schan::ChannelBalancer;
+friend class rdma::RdmaEndpoint;
+friend class rdma::RdmaConnect;
+friend class ubring::UBShmEndpoint;
+friend class ubring::UBConnect;
+friend class UBShmTransport;
+friend class rdma::RdmaHandshakeClientV2;
+friend class rdma::RdmaHandshakeServerV2;
+friend class rdma::RdmaHandshakeClientV3;
+friend class rdma::RdmaHandshakeServerV3;
+friend class urma::UrmaEndpoint;
+friend class urma::UrmaConnect;
+friend class urma::UrmaHandshakeClientV2;
+friend class urma::UrmaHandshakeServerV2;
+friend class urma::UrmaHandshakeClientV3;
+friend class urma::UrmaHandshakeServerV3;
 friend class HealthCheckTask;
 friend class OnAppHealthCheckDone;
 friend class HealthCheckManager;
 friend class policy::H2GlobalStreamCreator;
+friend class VersionedRefWithId<Socket>;
+friend class IOEvent<Socket>;
+friend void DereferenceSocket(Socket*);
+friend class Transport;
+friend class TcpTransport;
+friend class RdmaTransport;
+friend class UrmaTransport;
+friend class TransportFactory;
     class SharedPart;
-    struct Forbidden {};
     struct WriteRequest;
 
 public:
     const static int STREAM_FAKE_FD = INT_MAX;
     // NOTE: User cannot create Socket from constructor. Use Create()
     // instead. It's public just because of requirement of ResourcePool.
-    Socket(Forbidden);
+    explicit Socket(Forbidden);
     ~Socket();
 
     // Write `msg' into this Socket and clear it. The `msg' should be an
@@ -238,14 +394,21 @@ public:
     // - Write once when uncontended(most cases).
     // - Wait-free when contended.
     struct WriteOptions {
-        // `id_wait' is signalled when this Socket is SetFailed. To disable
-        // the signal, set this field to INVALID_BTHREAD_ID.
-        // `on_reset' of `id_wait' is NOT called when Write() returns non-zero.
+        // `id_wait' is signalled when this Socket is SetFailed or data is written
+        // successfully with `notify_on_success=true'. To disable the signal, set
+        // this field to INVALID_BTHREAD_ID. `on_reset' of `id_wait' is NOT called
+        // when Write() returns non-zero.
         // Default: INVALID_BTHREAD_ID
         bthread_id_t id_wait;
+
+        // If this field is set to true and `id_wait' is not INVALID_BTHREAD_ID,
+        // `id_wait' can be signalled when write successfully.
+        // Default: false
+        bool notify_on_success;
+
         // If no connection exists, a connection will be established to
-        // remote_side() regarding deadline `abstime'. NULL means no timeout.
-        // Default: NULL
+        // remote_side() regarding deadline `abstime'. nullptr means no timeout.
+        // Default: nullptr
         const timespec* abstime;
 
         // Will be queued to implement positional correspondence with responses
@@ -256,25 +419,52 @@ public:
         // The request contains authenticating information which will be
         // responded by the server and processed specially when dealing
         // with the response.
-        bool with_auth;
+        uint32_t auth_flags;
 
         // Do not return EOVERCROWDED
         // Default: false
         bool ignore_eovercrowded;
 
+        // The calling thread directly creates KeepWrite thread to write into
+        // this socket, skipping writing once.
+        // In situations like when you are continually issuing lots of
+        // StreamWrite or async RPC calls in only one thread, directly creating
+        // KeepWrite thread at first provides batch write effect and better
+        // performance. Otherwise, each write only writes one `msg` into socket
+        // and no KeepWrite thread can be created, which brings poor
+        // performance.
+        // Default: false
+        bool write_in_background;
+
+        // After this write complete, shutdown write of the socket.
+        // Default: false
+        bool shutdown_write;
+
         WriteOptions()
-            : id_wait(INVALID_BTHREAD_ID), abstime(NULL)
-            , pipelined_count(0), with_auth(false)
-            , ignore_eovercrowded(false) {}
+            : id_wait(INVALID_BTHREAD_ID)
+            , notify_on_success(false)
+            , abstime(nullptr)
+            , pipelined_count(0)
+            , auth_flags(0)
+            , ignore_eovercrowded(false)
+            , write_in_background(false)
+            , shutdown_write(false) {}
     };
-    int Write(butil::IOBuf *msg, const WriteOptions* options = NULL);
+
+    // True if write of socket is shutdown.
+    bool IsWriteShutdown() const { return _is_write_shutdown; }
+
+    int Write(butil::IOBuf *msg, const WriteOptions* options = nullptr);
 
     // Write an user-defined message. `msg' is released when Write() is
     // successful and *may* remain unchanged otherwise.
-    int Write(SocketMessagePtr<>& msg, const WriteOptions* options = NULL);
+    int Write(SocketMessagePtr<>& msg, const WriteOptions* options = nullptr);
 
     // The file descriptor
     int fd() const { return _fd.load(butil::memory_order_relaxed); }
+
+    // The file descriptor version, used to avoid ABA problem.
+    uint64_t fd_version() const { return _fd_version.load(butil::memory_order_relaxed); }
 
     // ip/port of the local end of the connection
     butil::EndPoint local_side() const { return _local_side; }
@@ -282,15 +472,34 @@ public:
     // ip/port of the other end of the connection.
     butil::EndPoint remote_side() const { return _remote_side; }
 
-    // Positive value enables health checking.
     // Initialized by SocketOptions.health_check_interval_s.
     int health_check_interval() const { return _health_check_interval_s; }
 
-    // The unique identifier.
-    SocketId id() const { return _this_id; }
+    const std::string& health_check_path() const { return _hc_option.health_check_path; }
+
+    int32_t health_check_timeout_ms() const {return _hc_option.health_check_timeout_ms; }
+
+    // True if health checking is enabled.
+    bool HCEnabled() const {
+        // This fence makes sure that we see change of
+        // `_is_hc_related_ref_held' before changing `_versioned_ref.
+        butil::atomic_thread_fence(butil::memory_order_acquire);
+        return _health_check_interval_s > 0 && _is_hc_related_ref_held;
+    }
+
+    // Release the health-checking-related
+    // reference which is held on created.
+    void ReleaseHCRelatedReference();
 
     // `user' parameter passed to Create().
     SocketUser* user() const { return _user; }
+
+    // Attach the SocketUser after creation. Only safe before the SocketId
+    // is published to other threads (e.g. right after a successful
+    // Create+Address). Callers creating a socket with a null user and
+    // attaching it here get a single cleanup rule: creation failures never
+    // run SocketUser::BeforeRecycle, so the call site disposes the user.
+    void set_user(SocketUser* user) { _user = user; }
 
     // `conn' parameter passed to Create()
     void set_conn(SocketConnection* conn) { _conn = conn; }
@@ -302,8 +511,8 @@ public:
     Destroyable* release_parsing_context();
     Destroyable* parsing_context() const
     { return _parsing_context.load(butil::memory_order_consume); }
-    // Try to set _parsing_context to *ctx when _parsing_context is NULL.
-    // If _parsing_context is NULL, the set is successful and true is returned.
+    // Try to set _parsing_context to *ctx when _parsing_context is nullptr.
+    // If _parsing_context is nullptr, the set is successful and true is returned.
     // Otherwise, *ctx is Destroy()-ed and replaced with the value of
     // _parsing_context, and false is returned. This process is thread-safe.
     template <typename T> bool initialize_parsing_context(T** ctx);
@@ -313,27 +522,12 @@ public:
     AuthContext* mutable_auth_context();
 
     // Create a Socket according to `options', put the identifier into `id'.
-    // Returns 0 on sucess, -1 otherwise.
+    // Returns 0 on success, -1 otherwise.
     static int Create(const SocketOptions& options, SocketId* id);
 
-    // Place the Socket associated with identifier `id' into unique_ptr `ptr',
-    // which will be released automatically when out of scope (w/o explicit
-    // std::move). User can still access `ptr' after calling ptr->SetFailed()
-    // before release of `ptr'.
-    // This function is wait-free.
-    // Returns 0 on success, -1 when the Socket was SetFailed().
-    static int Address(SocketId id, SocketUniquePtr* ptr);
-
-    // Re-address current socket into `ptr'.
-    // Always succeed even if this socket is failed.
-    void ReAddress(SocketUniquePtr* ptr);
-
-    // Returns 0 on success, 1 on failed socket, -1 on recycled.
-    static int AddressFailedAsWell(SocketId id, SocketUniquePtr* ptr);
-
     // Mark this Socket or the Socket associated with `id' as failed.
-    // Any later Address() of the identifier shall return NULL unless the
-    // Socket was revivied by HealthCheckThread. The Socket is NOT recycled
+    // Any later Address() of the identifier shall return nullptr unless the
+    // Socket was revivied by StartHealthCheck. The Socket is NOT recycled
     // after calling this function, instead it will be recycled when no one
     // references it. Internal fields of the Socket are still accessible
     // after calling this function. Calling SetFailed() of a Socket more
@@ -353,19 +547,10 @@ public:
 
     void FeedbackCircuitBreaker(int error_code, int64_t latency_us);
 
-    bool Failed() const;
-
-    bool DidReleaseAdditionalRereference() const
-    { return _recycle_flag.load(butil::memory_order_relaxed); }
-
     // Notify `id' object (by calling bthread_id_error) when this Socket
     // has been `SetFailed'. If it already has, notify `id' immediately
     void NotifyOnFailed(bthread_id_t id);
 
-    // Release the additional reference which added inside `Create'
-    // before so that `Socket' will be recycled automatically once
-    // on one is addressing it.
-    int ReleaseAdditionalReference();
     // `ReleaseAdditionalReference' this Socket iff it has no data
     // transmission during the last `idle_seconds'
     int ReleaseReferenceIfIdle(int idle_seconds);
@@ -381,8 +566,8 @@ public:
 
     // Start to process edge-triggered events from the fd.
     // This function does not block caller.
-    static int StartInputEvent(SocketId id, uint32_t events,
-                               const bthread_attr_t& thread_attr);
+    static int OnInputEvent(void* user_data, uint32_t events,
+                            const bthread_attr_t& thread_attr);
 
     static const int PROGRESS_INIT = 1;
     bool MoreReadEvents(int* progress);
@@ -401,6 +586,10 @@ public:
     // This function can only be called after a successfule
     // `FightAuthentication', otherwise it's regarded as an error
     void SetAuthentication(int error_code);
+
+    // Returns true iff authentication over this socket has completed
+    // successfully, i.e. `SetAuthentication(0)' was called.
+    bool IsAuthenticated() const;
 
     // Since some protocols are not able to store correlation id in their
     // headers (such as nova-pbrpc, http), we have to store it here. Note
@@ -449,6 +638,9 @@ public:
     // True if this socket was created by Connect.
     bool CreatedByConnect() const;
 
+    // The socket mode decided at creation.
+    SocketMode socket_mode() const { return _socket_mode; }
+
     // Get an UNUSED socket connecting to the same place as this socket
     // from the SocketPool of this socket.
     int GetPooledSocket(SocketUniquePtr* pooled_socket);
@@ -472,7 +664,7 @@ public:
     // Get and persist a socket connecting to the same place as this socket.
     // If an agent socket was already created and persisted, it's returned
     // directly (provided other constraints are satisfied)
-    // If `checkfn' is not NULL, and the checking result on the socket that
+    // If `checkfn' is not nullptr, and the checking result on the socket that
     // would be returned is false, the socket is abandoned and the getting
     // process is restarted.
     // For example, http2 connections may run out of stream_id after long time
@@ -499,6 +691,21 @@ public:
     void fail_me_at_server_stop() { _fail_me_at_server_stop = true; }
     bool shall_fail_me_at_server_stop() const { return _fail_me_at_server_stop; }
 
+    // Track references held by deferred responses waiting for peer activity
+    // (such as HTTP/2 WINDOW_UPDATE). Unlike fail_me_at_server_stop(), these
+    // references are allowed to drain gracefully on Server.Stop(), but must
+    // trigger SetFailed() when the socket becomes idle so NotifyOnFailed()
+    // callbacks can clean up buffered state and release the socket.
+    void AddIdleFailRef() {
+        _idle_fail_ref_count.fetch_add(1, butil::memory_order_relaxed);
+    }
+    void ReleaseIdleFailRef() {
+        _idle_fail_ref_count.fetch_sub(1, butil::memory_order_relaxed);
+    }
+    bool shall_fail_me_at_idle_timeout() const {
+        return _idle_fail_ref_count.load(butil::memory_order_relaxed) > 0;
+    }
+
     // Tag the socket so that the response coming back from socket will be
     // parsed progressively. For example: in HTTP, the RPC may end w/o reading
     // the body part fully.
@@ -520,13 +727,13 @@ public:
             _last_writetime_us.load(butil::memory_order_relaxed));
     }
 
-    // A brief description of this socket, consistent with os << *this
-    std::string description() const;
-
     // Returns true if the remote side is overcrowded.
-    bool is_overcrowded() const { return _overcrowded; }
+    bool is_overcrowded() const;
 
     bthread_keytable_pool_t* keytable_pool() const { return _keytable_pool; }
+
+    void set_http_request_method(const HttpMethod& method) { _http_request_method = method; }
+    HttpMethod http_request_method() const { return _http_request_method; }
 
 private:
     DISALLOW_COPY_AND_ASSIGN(Socket);
@@ -534,10 +741,28 @@ private:
     int ConductError(bthread_id_t);
     int StartWrite(WriteRequest*, const WriteOptions&);
 
-    int Dereference();
-friend void DereferenceSocket(Socket*);
+    // Create a Socket according to `options', put the identifier into `id'.
+    // Returns 0 on success, -1 otherwise.
+    int OnCreated(const SocketOptions& options);
 
-    static int Status(SocketId, int32_t* nref = NULL);  // for unit-test.
+    // Called before returning to pool.
+    void BeforeRecycled();
+
+    void OnFailed(int error_code, const std::string& error_text);
+
+    // Make this socket addressable again.
+    void AfterRevived();
+
+    std::string OnDescription() const;
+
+    // Hold the health-checking-related
+    // reference on created.
+    void HoldHCRelatedRef();
+
+    // Copy connection configuration for pooled and short sockets.
+    SocketOptions GetSubSocketOptions() const;
+
+    static int Status(SocketId, int32_t* nref = nullptr);  // for unit-test.
 
     // Perform SSL handshake after TCP connection has been established.
     // Create SSL session inside and block (in bthread) until handshake
@@ -546,19 +771,29 @@ friend void DereferenceSocket(Socket*);
     // Returns 0 on success, -1 otherwise
     int SSLHandshake(int fd, bool server_mode);
 
+    // The input stream carried by `_fd`.
+    InputMessengerProcessor& fd_input_processor() { return _fd_input_processor; }
+    void set_parsing_stream_type(InputMessengerProcessor::StreamType type) {
+        _parsing_stream_type.store(type, butil::memory_order_relaxed);
+    }
+
+    // Which of this Socket's input streams the parse callbacks running right
+    // now were called for, STREAM_NONE while none are. Only meaningful with a
+    // parse callback on the stack.
+    InputMessengerProcessor::StreamType parsing_stream_type() const {
+        return _parsing_stream_type.load(butil::memory_order_relaxed);
+    }
+
     // Based upon whether the underlying channel is using SSL (if
     // SSLState is SSL_UNKNOWN, try to detect at first), read data
-    // using the corresponding method into `_read_buf'. Returns read
+    // using the corresponding method into `read_buf`. Returns read
     // bytes on success, 0 on EOF, -1 otherwise and errno is set
-    ssize_t DoRead(size_t size_hint);
+    ssize_t DoRead(butil::IOPortal* read_buf, size_t size_hint);
 
     // Based upon whether the underlying channel is using SSL, write
     // `req' using the corresponding method. Returns written bytes on
     // success, -1 otherwise and errno is set
     ssize_t DoWrite(WriteRequest* req);
-
-    // Called before returning to pool.
-    void OnRecycle();
 
     // [Not thread-safe] Wait for EPOLLOUT event on `fd'. If `pollin' is
     // true, EPOLLIN event will also be included and EPOLL_CTL_MOD will
@@ -568,13 +803,16 @@ friend void DereferenceSocket(Socket*);
     int WaitEpollOut(int fd, bool pollin, const timespec* abstime);
 
     // [Not thread-safe] Establish a tcp connection to `remote_side()'
-    // If `on_connect' is NULL, this function blocks current thread
+    // If `on_connect' is nullptr, this function blocks current thread
     // until connected/timeout. Otherwise, it returns immediately after
     // starting a connection request and `on_connect' will be called
     // when connecting completes (whether it succeeds or not)
     // Returns the socket fd on success, -1 otherwise
+    int DoConnect(const timespec* abstime,
+                  int (*on_connect)(int fd, int err, void* data), void* data);
     int Connect(const timespec* abstime,
                 int (*on_connect)(int fd, int err, void* data), void* data);
+
     int CheckConnected(int sockfd);
 
     // [Not thread-safe] Only used by `Write'.
@@ -586,13 +824,11 @@ friend void DereferenceSocket(Socket*);
 
     int ResetFileDescriptor(int fd);
 
+    void SetSocketOptions(int fd);
+
     // Wait until nref hits `expected_nref' and reset some internal resources.
     int WaitAndReset(int32_t expected_nref);
 
-    // Make this socket addressable again.
-    void Revive();
-
-    static void* ProcessEvent(void*);
 
     static void* KeepWrite(void*);
 
@@ -606,8 +842,12 @@ friend void DereferenceSocket(Socket*);
         WriteRequest*, int error_code, const std::string& error_text);
     void ReleaseAllFailedWriteRequests(WriteRequest*);
 
-    // Generic callback for Socket to handle epollout event
-    static int HandleEpollOut(SocketId socket_id);
+    // Try to wake socket just like epollout has arrived
+    void WakeAsEpollOut();
+
+    // Generic callback for Socket to handle output event.
+    static int OnOutputEvent(void* user_data, uint32_t,
+                             const bthread_attr_t&);
 
     class EpollOutRequest;
     // Callback to handle epollout event whose request data
@@ -634,7 +874,7 @@ friend void DereferenceSocket(Socket*);
     // broken socket.
     int AddStream(StreamId stream_id);
     int RemoveStream(StreamId stream_id);
-    void ResetAllStreams();
+    void ResetAllStreams(int error_code, const std::string& error_text);
 
     bool ValidFileDescriptor(int fd);
 
@@ -662,16 +902,6 @@ friend void DereferenceSocket(Socket*);
     void CancelUnwrittenBytes(size_t bytes);
 
 private:
-    // unsigned 32-bit version + signed 32-bit referenced-count.
-    // Meaning of version:
-    // * Created version: no SetFailed() is called on the Socket yet. Must be
-    //   same evenness with initial _versioned_ref because during lifetime of
-    //   a Socket on the slot, the version is added with 1 twice. This is
-    //   also the version encoded in SocketId.
-    // * Failed version: = created version + 1, SetFailed()-ed but returned.
-    // * Other versions: the socket is already recycled.
-    butil::atomic<uint64_t> _versioned_ref;
-
     // In/Out bytes/messages, SocketPool etc
     // _shared_part is shared by a main socket and all its pooled sockets.
     // Can't use intrusive_ptr because the creation is based on optimistic
@@ -691,18 +921,30 @@ private:
     butil::atomic<int> _fd;  // -1 when not connected.
     int _tos;                // Type of service which is actually only 8bits.
     int64_t _reset_fd_real_us; // When _fd was reset, in microseconds.
+    // ABA/version counter; written on fd reset and read via fd_version() from
+    // other threads, so use relaxed atomics to avoid a data race.
+    butil::atomic<uint64_t> _fd_version;  // Only used by mysql for now.
 
     // Address of peer. Initialized by SocketOptions.remote_side.
     butil::EndPoint _remote_side;
 
-    // Address of self. Initialized in ResetFileDescriptor().
+    // Runtime local endpoint. Updated in ResetFileDescriptor() and cleared
+    // in WaitAndReset().
     butil::EndPoint _local_side;
+
+    // Client binding address from SocketOptions.local_side, preserved across
+    // health-check/revive. IPv4/IPv6 network ports are normalized to 0;
+    // Unix-domain addresses and extended endpoint type tags are preserved.
+    butil::EndPoint _bind_local_side;
+
+    // The device name of the client's network adapter.
+    std::string _device_name;
 
     // Called when edge-triggered events happened on `_fd'. Read comments
     // of EventDispatcher::AddConsumer (event_dispatcher.h)
     // carefully before implementing the callback.
     void (*_on_edge_triggered_events)(Socket*);
-
+    bool _need_on_edge_trigger;
     // A set of callbacks to monitor important events of this socket.
     // Initialized by SocketOptions.user
     SocketUser* _user;
@@ -714,10 +956,9 @@ private:
     // Initialized by SocketOptions.app_connect.
     std::shared_ptr<AppConnect> _app_connect;
 
-    // Identifier of this Socket in ResourcePool
-    SocketId _this_id;
+    IOEvent<Socket> _io_event;
 
-    // last chosen index of the protocol as a heuristic value to avoid
+    // Last chosen index of the protocol as a heuristic value to avoid
     // iterating all protocol handlers each time.
     int _preferred_index;
 
@@ -725,19 +966,26 @@ private:
     // socket is revived. Only set in HealthCheckTask::OnTriggeringTask()
     int _hc_count;
 
-    // Size of current incomplete message, set to 0 on complete.
-    uint32_t _last_msg_size;
-    // Average message size of last #MSG_SIZE_WINDOW messages (roughly)
-    uint32_t _avg_msg_size;
-
-    // Storing data read from `_fd' but cut-off yet.
-    butil::IOPortal _read_buf;
+    // The input stream carried by `_fd`, holding the data read from it but not cut off
+    // yet. Only the bthread draining the fd (InputMessenger:: OnNewMessages) may touch
+    // it, see InputMessengerProcessor.
+    InputMessengerProcessor _fd_input_processor;
 
     // Set with cpuwide_time_us() at last read operation
     butil::atomic<int64_t> _last_readtime_us;
 
     // Saved context for parsing, reset before trying other protocols.
     butil::atomic<Destroyable*> _parsing_context;
+    // DebugSocket() describes _parsing_context outside the bthread parsing
+    // messages, which may reset or release the context at the same time.
+    // Both hold this mutex, so that the context is not destroyed while
+    // being described. Describe() runs under the mutex and must not reset
+    // the parsing context of the socket. initialize_parsing_context() does
+    // not need it: it never destroys a context set in the socket.
+    butil::Mutex _parsing_context_mutex;
+
+    // The stream whose data the handlers are currently cutting.
+    butil::atomic<InputMessengerProcessor::StreamType> _parsing_stream_type;
 
     // Saving the correlation_id of RPC on protocols that cannot put
     // correlation_id on-wire and do not send multiple requests on one
@@ -746,6 +994,11 @@ private:
 
     // Non-zero when health-checking is on.
     int _health_check_interval_s;
+
+    // The variable indicates whether the reference related
+    // to the health checking is held by someone. It can be
+    // synchronized via _versioned_ref atomic variable.
+    bool _is_hc_related_ref_held;
 
     // +-1 bit-+---31 bit---+
     // |  flag |   counter  |
@@ -768,25 +1021,28 @@ private:
     // exists in server side
     AuthContext* _auth_context;
 
+    // Only accept ssl connection.
+    bool _force_ssl;
     SSLState _ssl_state;
+    // SSL objects cannot be read and written at the same time.
+    // Use mutex to protect SSL objects when ssl_state is SSL_CONNECTED.
+    mutable butil::Mutex _ssl_session_mutex;
     SSL* _ssl_session;               // owner
     std::shared_ptr<SocketSSLContext> _ssl_ctx;
+
+    // Should use SOCKET_MODE_RDMA or SOCKET_MODE_TCP or Other, default is SOCKET_MODE_TCP Transport
+    SocketMode _socket_mode;
+    std::unique_ptr<Transport> _transport;
 
     // Pass from controller, for progressive reading.
     ConnectionType _connection_type_for_progressive_read;
     butil::atomic<bool> _controller_released_socket;
 
-    // True if the socket is too full to write.
-    volatile bool _overcrowded;
-
     bool _fail_me_at_server_stop;
+    butil::atomic<int32_t> _idle_fail_ref_count;
 
     // Set by SetLogOff
     butil::atomic<bool> _logoff_flag;
-
-    // Flag used to mark whether additional reference has been decreased
-    // by either `SetFailed' or `SetRecycle'
-    butil::atomic<bool> _recycle_flag;
 
     // Concrete error information from SetFailed()
     // Accesses to these 2 fields(especially _error_text) must be protected
@@ -814,10 +1070,30 @@ private:
     // Storing data that are not flushed into `fd' yet.
     butil::atomic<WriteRequest*> _write_head;
 
+    bool _is_write_shutdown;
+
     butil::Mutex _stream_mutex;
     std::set<StreamId> *_stream_set;
+    butil::atomic<int64_t> _total_streams_unconsumed_size;
 
     butil::atomic<int64_t> _ninflight_app_health_check;
+
+    // Socket keepalive related options.
+    // Refer to `SocketKeepaliveOptions' for details.
+    // An engaged value means that keepalive is on.
+    butil::optional<SocketKeepaliveOptions> _keepalive_options;
+
+    // Only linux supports TCP_USER_TIMEOUT.
+    // When the value is greater than 0, it specifies the maximum
+    // amount of time in milliseconds that transmitted data may
+    // remain unacknowledged, or bufferred data may remain
+    // untransmitted (due to zero window size) before TCP will
+    // forcibly close the corresponding connection and return
+    // ETIMEDOUT to the application.
+    int _tcp_user_timeout_ms;
+
+    HttpMethod _http_request_method;
+    HealthCheckOption _hc_option;
 };
 
 } // namespace brpc

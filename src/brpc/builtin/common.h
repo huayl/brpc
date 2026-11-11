@@ -52,9 +52,11 @@ enum ProfilingType {
     PROFILING_HEAP = 1,
     PROFILING_GROWTH = 2,
     PROFILING_CONTENTION = 3,
+    PROFILING_IOBUF = 4,
 };
 
 DECLARE_string(rpc_profiling_dir);
+DECLARE_int32(max_profiling_seconds);
 
 bool UseHTML(const HttpHeader& header);
 bool MatchAnyWildcard(const std::string& name,
@@ -72,7 +74,7 @@ std::ostream& operator<<(std::ostream& os, const PrintedAsDateTime&);
 struct Path {
     static const butil::EndPoint *LOCAL;
     Path(const char* uri2, const butil::EndPoint* html_addr2)
-        : uri(uri2), html_addr(html_addr2), text(NULL) {}
+        : uri(uri2), html_addr(html_addr2), text(nullptr) {}
     
     Path(const char* uri2, const butil::EndPoint* html_addr2, const char* text2)
         : uri(uri2), html_addr(html_addr2), text(text2) {}
@@ -111,6 +113,9 @@ int FileChecksum(const char* file_path, unsigned char* checksum);
 
 // Get name of current program.
 const char* GetProgramName();
+
+// Get absolute path of current program.
+const char* GetProgramPath();
 
 // Get checksum of current program image.
 const char* GetProgramChecksum();

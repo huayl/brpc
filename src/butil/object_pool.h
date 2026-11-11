@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: Sun Jul 13 15:04:18 CST 2014
 
@@ -23,6 +23,8 @@
 #define BUTIL_OBJECT_POOL_H
 
 #include <cstddef>                       // size_t
+#include <cstdint>
+#include "butil/type_traits.h"
 
 // ObjectPool is a derivative class of ResourcePool to allocate and
 // reuse fixed-size objects without identifiers.
@@ -57,11 +59,15 @@ template <typename T> struct ObjectPoolFreeChunkMaxItem {
 
 // ObjectPool calls this function on newly constructed objects. If this
 // function returns false, the object is destructed immediately and
-// get_object() shall return NULL. This is useful when the constructor
+// get_object() shall return nullptr. This is useful when the constructor
 // failed internally(namely ENOMEM).
 template <typename T> struct ObjectPoolValidator {
     static bool validate(const T*) { return true; }
 };
+
+//
+template <typename T>
+struct ObjectPoolWithASanPoison : true_type {};
 
 }  // namespace butil
 
@@ -69,22 +75,16 @@ template <typename T> struct ObjectPoolValidator {
 
 namespace butil {
 
+// Whether if FreeChunk of LocalPool is empty.
+template <typename T> inline bool local_pool_free_empty() {
+    return ObjectPool<T>::singleton()->local_free_empty();
+}
+
 // Get an object typed |T|. The object should be cleared before usage.
-// NOTE: T must be default-constructible.
-template <typename T> inline T* get_object() {
-    return ObjectPool<T>::singleton()->get_object();
-}
-
-// Get an object whose constructor is T(arg1)
-template <typename T, typename A1>
-inline T* get_object(const A1& arg1) {
-    return ObjectPool<T>::singleton()->get_object(arg1);
-}
-
-// Get an object whose constructor is T(arg1, arg2)
-template <typename T, typename A1, typename A2>
-inline T* get_object(const A1& arg1, const A2& arg2) {
-    return ObjectPool<T>::singleton()->get_object(arg1, arg2);
+// NOTE: If there are no arguments, T must be default-constructible.
+template <typename T, typename... Args>
+inline T* get_object(Args&&... args) {
+    return ObjectPool<T>::singleton()->get_object(std::forward<Args>(args)...);
 }
 
 // Return the object |ptr| back. The object is NOT destructed and will be
@@ -108,6 +108,23 @@ template <typename T> inline void clear_objects() {
 // Don't use it frequently like a "getter" function.
 template <typename T> ObjectPoolInfo describe_objects() {
     return ObjectPool<T>::singleton()->describe_objects();
+}
+
+// Process objects cached globally for at least idle_us (monotonic time).
+// Exclusively borrow whole chunks until at least max_items objects are selected
+// or no eligible chunks remain, then invoke fn outside the pool lock. The count
+// may exceed max_items by at most ObjectPool<T>::FREE_CHUNK_NITEM - 1 objects.
+// Use SIZE_MAX to process all eligible global chunks in one call.
+// fn must be noexcept, preserve each object's lifetime/address,
+// and leave it reusable. Borrowers restore any resources released by fn.
+// Processed chunks become cold and are reused only after the regular global
+// free list is empty. They are not processed again until borrowed and returned
+// to the global free list.
+// Return the number of objects passed to fn, regardless of its effects.
+// TLS caches are untouched. Finish all calls before clearing a pool in tests.
+template <typename T, typename Fn>
+inline size_t process_idle_objects(int64_t idle_us, size_t max_items, Fn& fn) {
+    return ObjectPool<T>::singleton()->process_idle_objects(idle_us, max_items, fn);
 }
 
 }  // namespace butil

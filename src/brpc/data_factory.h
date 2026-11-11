@@ -31,7 +31,7 @@ public:
     virtual ~DataFactory() {}
 
     // Implement this method to create a piece of data
-    // Returns the data, NULL on error.
+    // Returns the data, nullptr on error.
     virtual void* CreateData() const = 0;
 
     // Implement this method to destroy data created by Create().
@@ -41,7 +41,7 @@ public:
     // Returns
     //   true:  the data can be kept for future reuse
     //   false: the data is improper to be reused and should be sent to 
-    //          DestoryData() immediately after calling this method
+    //          DestroyData() immediately after calling this method
     virtual bool ResetData(void*) const { return true; }
 };
 

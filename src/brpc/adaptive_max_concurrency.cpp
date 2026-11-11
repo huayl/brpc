@@ -21,6 +21,7 @@
 #include "butil/logging.h"
 #include "butil/strings/string_number_conversions.h"
 #include "brpc/adaptive_max_concurrency.h"
+#include "brpc/concurrency_limiter.h"
 
 namespace brpc {
 
@@ -40,9 +41,13 @@ AdaptiveMaxConcurrency::AdaptiveMaxConcurrency(int max_concurrency)
     }
 }
 
+AdaptiveMaxConcurrency::AdaptiveMaxConcurrency(
+    const TimeoutConcurrencyConf& value)
+    : _value("timeout"), _max_concurrency(-1), _timeout_conf(value) {}
+
 inline bool CompareStringPieceWithoutCase(
     const butil::StringPiece& s1, const char* s2) {
-    DCHECK(s2 != NULL);
+    DCHECK(s2 != nullptr);
     if (std::strlen(s2) != s1.size()) {
         return false;
     }
@@ -68,6 +73,9 @@ void AdaptiveMaxConcurrency::operator=(const butil::StringPiece& value) {
         value.CopyToString(&_value);
         _max_concurrency = -1;
     }
+    if (_cl) {
+        _cl->ResetMaxConcurrency(*this);
+    }
 }
 
 void AdaptiveMaxConcurrency::operator=(int max_concurrency) {
@@ -77,6 +85,18 @@ void AdaptiveMaxConcurrency::operator=(int max_concurrency) {
     } else {
         _value = butil::string_printf("%d", max_concurrency);
         _max_concurrency = max_concurrency;
+    }
+    if (_cl) {
+        _cl->ResetMaxConcurrency(*this);
+    }
+}
+
+void AdaptiveMaxConcurrency::operator=(const TimeoutConcurrencyConf& value) {
+    _value = "timeout";
+    _max_concurrency = -1;
+    _timeout_conf = value;
+    if (_cl) {
+        _cl->ResetMaxConcurrency(*this);
     }
 }
 
@@ -88,16 +108,6 @@ const std::string& AdaptiveMaxConcurrency::type() const {
     } else {
         return _value;
     }
-}
-
-const std::string& AdaptiveMaxConcurrency::UNLIMITED() {
-    static std::string* s = new std::string("unlimited");
-    return *s;
-}
-
-const std::string& AdaptiveMaxConcurrency::CONSTANT() {
-    static std::string* s = new std::string("constant");
-    return *s;
 }
 
 bool operator==(const AdaptiveMaxConcurrency& adaptive_concurrency,

@@ -20,11 +20,36 @@
 #include "butil/logging.h"
 #include "butil/string_printf.h"
 #include "brpc/redis_reply.h"
+#include "gflags/gflags.h"
 
 namespace brpc {
 
+DEFINE_int32(redis_max_allocation_size, 64 * 1024 * 1024, 
+             "Maximum memory allocation size in bytes for a single redis request or reply (64MB by default)");
+DEFINE_int32(redis_max_reply_depth, 128,
+             "Maximum nesting depth for redis array replies");
+
 //BAIDU_CASSERT(sizeof(RedisReply) == 24, size_match);
 const int RedisReply::npos = -1;
+
+// Charge `need' payload bytes of a string to the per-reply budget kept in
+// `used_bytes'. Returns false if the budget would be exceeded, in which case
+// nothing is charged. The arena rounds each string up to 8 bytes; that padding
+// is not charged so that a string of exactly -redis_max_allocation_size bytes
+// stays valid, as the per-string checks allow, and it is bounded
+// constant-factor overhead.
+static bool ChargeReplyAllocation(uint32_t* used_bytes, uint64_t need) {
+    if (FLAGS_redis_max_allocation_size > 0 &&
+        (uint64_t)*used_bytes + need >
+            (uint64_t)FLAGS_redis_max_allocation_size) {
+        LOG(ERROR) << "accumulated reply allocation exceeds max allocation "
+                      "size! max=" << FLAGS_redis_max_allocation_size
+                   << ", already=" << *used_bytes << ", requesting=" << need;
+        return false;
+    }
+    *used_bytes += need;
+    return true;
+}
 
 const char* RedisReplyTypeToString(RedisReplyType type) {
     switch (type) {
@@ -90,12 +115,41 @@ bool RedisReply::SerializeTo(butil::IOBufAppender* appender) {
 }
 
 ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
+    // `used_bytes' accumulates the arena bytes charged to
+    // -redis_max_allocation_size for this reply. It is shared by the whole
+    // reply tree so that nested arrays draw from one budget instead of each
+    // getting a full one (which multiplied the cap by nesting depth). When
+    // the parsing suspends, the count is saved in the root array and restored
+    // on resume, otherwise a peer could reset the budget by withholding data.
+    uint32_t used_bytes = 0;
+    ParseError err = ConsumePartialIOBuf(buf, 0, &used_bytes);
+    if (err != PARSE_OK && _type == REDIS_REPLY_ARRAY &&
+        _data.array.last_index >= 0) {
+        // The parsing suspends on sub replies, remember the budget for resume.
+        _data.array.used_bytes = used_bytes;
+    }
+    return err;
+}
+
+ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf, int depth,
+                                           uint32_t* used_bytes) {
+    if (depth > FLAGS_redis_max_reply_depth) {
+        LOG(ERROR) << "redis reply exceeds max depth! max="
+                   << FLAGS_redis_max_reply_depth << ", actually=" << depth;
+        return PARSE_ERROR_ABSOLUTELY_WRONG;
+    }
     if (_type == REDIS_REPLY_ARRAY && _data.array.last_index >= 0) {
+        if (depth == 0) {
+            // Resuming the root array of a suspended reply: restore the
+            // budget charged by previous calls.
+            *used_bytes = _data.array.used_bytes;
+        }
         // The parsing was suspended while parsing sub replies,
         // continue the parsing.
         RedisReply* subs = (RedisReply*)_data.array.replies;
         for (int i = _data.array.last_index; i < _length; ++i) {
-            ParseError err = subs[i].ConsumePartialIOBuf(buf);
+            ParseError err = subs[i].ConsumePartialIOBuf(buf, depth + 1,
+                                                         used_bytes);
             if (err != PARSE_OK) {
                 return err;
             }
@@ -108,7 +162,7 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
 
     // Notice that all branches returning PARSE_ERROR_NOT_ENOUGH_DATA must not change `buf'.
     const char* pfc = (const char*)buf.fetch1();
-    if (pfc == NULL) {
+    if (pfc == nullptr) {
         return PARSE_ERROR_NOT_ENOUGH_DATA;
     }
     const char fc = *pfc;  // first character
@@ -123,9 +177,27 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
                               " actually=" << len;
                 return PARSE_ERROR_ABSOLUTELY_WRONG;
             }
+            // Enforce the cap while still waiting for CRLF, otherwise a peer
+            // that never sends the terminator can grow buf without bound (like
+            // RedisCommandParser does for inline commands). buf holds the first
+            // char plus the payload so far; allow one extra byte for a boundary
+            // '\r' whose matching '\n' hasn't arrived yet.
+            if (FLAGS_redis_max_allocation_size < 0 ||
+                len > (size_t)FLAGS_redis_max_allocation_size + 2) {
+                LOG(ERROR) << "simple string exceeds max allocation size! max="
+                           << FLAGS_redis_max_allocation_size
+                           << ", actually=" << len - 1;
+                return PARSE_ERROR_ABSOLUTELY_WRONG;
+            }
             return PARSE_ERROR_NOT_ENOUGH_DATA;
         }
         const size_t len = str.size() - 1;
+        if (FLAGS_redis_max_allocation_size < 0 ||
+            len > (size_t)FLAGS_redis_max_allocation_size) {
+            LOG(ERROR) << "simple string exceeds max allocation size! max="
+                       << FLAGS_redis_max_allocation_size << ", actually=" << len;
+            return PARSE_ERROR_ABSOLUTELY_WRONG;
+        }
         if (len < sizeof(_data.short_str)) {
             // SSO short strings, including empty string.
             _type = (fc == '-' ? REDIS_REPLY_ERROR : REDIS_REPLY_STATUS);
@@ -133,8 +205,13 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
             str.copy_to_cstr(_data.short_str, (size_t)-1L, 1/*skip fc*/);
             return PARSE_OK;
         }
+        // Charge the payload to the per-reply budget so that an array of
+        // individually allowed strings cannot exceed the cap in total.
+        if (!ChargeReplyAllocation(used_bytes, len)) {
+            return PARSE_ERROR_ABSOLUTELY_WRONG;
+        }
         char* d = (char*)_arena->allocate((len/8 + 1)*8);
-        if (d == NULL) {
+        if (d == nullptr) {
             LOG(FATAL) << "Fail to allocate string[" << len << "]";
             return PARSE_ERROR_ABSOLUTELY_WRONG;
         }
@@ -154,7 +231,7 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
         if (crlf_pos == butil::StringPiece::npos) {  // not enough data
             return PARSE_ERROR_NOT_ENOUGH_DATA;
         }
-        char* endptr = NULL;
+        char* endptr = nullptr;
         int64_t value = strtoll(intbuf + 1/*skip fc*/, &endptr, 10);
         if (endptr != intbuf + crlf_pos) {
             LOG(ERROR) << '`' << intbuf + 1 << "' is not a valid 64-bit decimal";
@@ -175,9 +252,9 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
                 _data.integer = 0;
                 return PARSE_OK;
             }
-            if (len > (int64_t)std::numeric_limits<uint32_t>::max()) {
-                LOG(ERROR) << "bulk string is too long! max length=2^32-1,"
-                    " actually=" << len;
+            if (len > FLAGS_redis_max_allocation_size) {
+                LOG(ERROR) << "bulk string exceeds max allocation size! max=" 
+                           << FLAGS_redis_max_allocation_size << ", actually=" << len;
                 return PARSE_ERROR_ABSOLUTELY_WRONG;
             }
             // We provide c_str(), thus even if bulk string is started with
@@ -193,8 +270,11 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
                 buf.cutn(_data.short_str, len);
                 _data.short_str[len] = '\0';
             } else {
+                if (!ChargeReplyAllocation(used_bytes, len)) {
+                    return PARSE_ERROR_ABSOLUTELY_WRONG;
+                }
                 char* d = (char*)_arena->allocate((len/8 + 1)*8);
-                if (d == NULL) {
+                if (d == nullptr) {
                     LOG(FATAL) << "Fail to allocate string[" << len << "]";
                     return PARSE_ERROR_ABSOLUTELY_WRONG;
                 }
@@ -226,17 +306,24 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
                 _type = REDIS_REPLY_ARRAY;
                 _length = 0;
                 _data.array.last_index = -1;
-                _data.array.replies = NULL;
+                _data.array.replies = nullptr;
                 return PARSE_OK;
             }
-            if (count > (int64_t)std::numeric_limits<uint32_t>::max()) {
-                LOG(ERROR) << "Too many sub replies! max count=2^32-1,"
-                    " actually=" << count;
+            int64_t max_count = FLAGS_redis_max_allocation_size / sizeof(RedisReply);
+            if (count > max_count) {
+                LOG(ERROR) << "array allocation exceeds max allocation size! max=" 
+                           << max_count << ", actually=" << count;
+                return PARSE_ERROR_ABSOLUTELY_WRONG;
+            }
+            // Charge the allocation to the per-reply budget so that nested
+            // arrays cannot multiply -redis_max_allocation_size by depth.
+            const size_t need = sizeof(RedisReply) * count;
+            if (!ChargeReplyAllocation(used_bytes, need)) {
                 return PARSE_ERROR_ABSOLUTELY_WRONG;
             }
             // FIXME(gejun): Call allocate_aligned instead.
-            RedisReply* subs = (RedisReply*)_arena->allocate(sizeof(RedisReply) * count);
-            if (subs == NULL) {
+            RedisReply* subs = (RedisReply*)_arena->allocate(need);
+            if (subs == nullptr) {
                 LOG(FATAL) << "Fail to allocate RedisReply[" << count << "]";
                 return PARSE_ERROR_ABSOLUTELY_WRONG;
             }
@@ -252,7 +339,8 @@ ParseError RedisReply::ConsumePartialIOBuf(butil::IOBuf& buf) {
             // be continued in next calls by tracking _data.array.last_index.
             _data.array.last_index = 0;
             for (int64_t i = 0; i < count; ++i) {
-                ParseError err = subs[i].ConsumePartialIOBuf(buf);
+                ParseError err = subs[i].ConsumePartialIOBuf(buf, depth + 1,
+                                                             used_bytes);
                 if (err != PARSE_OK) {
                     return err;
                 }
@@ -362,7 +450,7 @@ void RedisReply::CopyFromDifferentArena(const RedisReply& other) {
     switch (_type) {
     case REDIS_REPLY_ARRAY: {
         RedisReply* subs = (RedisReply*)_arena->allocate(sizeof(RedisReply) * _length);
-        if (subs == NULL) {
+        if (subs == nullptr) {
             LOG(FATAL) << "Fail to allocate RedisReply[" << _length << "]";
             return;
         }
@@ -370,6 +458,7 @@ void RedisReply::CopyFromDifferentArena(const RedisReply& other) {
             new (&subs[i]) RedisReply(_arena);
         }
         _data.array.last_index = other._data.array.last_index;
+        _data.array.used_bytes = other._data.array.used_bytes;
         if (_data.array.last_index > 0) {
             // incomplete state
             for (int i = 0; i < _data.array.last_index; ++i) {
@@ -397,7 +486,7 @@ void RedisReply::CopyFromDifferentArena(const RedisReply& other) {
             memcpy(_data.short_str, other._data.short_str, _length + 1);
         } else {
             char* d = (char*)_arena->allocate((_length/8 + 1)*8);
-            if (d == NULL) {
+            if (d == nullptr) {
                 LOG(FATAL) << "Fail to allocate string[" << _length << "]";
                 return;
             }

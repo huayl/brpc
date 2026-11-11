@@ -19,6 +19,7 @@
 
 // Date: 2018/09/19 14:51:06
 
+#include <errno.h>
 #include <pthread.h>
 #include <gtest/gtest.h>
 #include <gflags/gflags.h>
@@ -45,6 +46,7 @@ const int kErrorCodeForSucc = 0;
 const int kErrorCost = 1000;
 const int kLatency = 1000;
 const int kThreadNum = 3;
+const int kHalfWindowSize = 0;
 } // namespace
 
 namespace brpc {
@@ -54,6 +56,7 @@ DECLARE_int32(circuit_breaker_short_window_error_percent);
 DECLARE_int32(circuit_breaker_long_window_error_percent);
 DECLARE_int32(circuit_breaker_min_isolation_duration_ms);
 DECLARE_int32(circuit_breaker_max_isolation_duration_ms);
+DECLARE_int32(circuit_breaker_half_open_window_size);
 } // namespace brpc
 
 int main(int argc, char* argv[]) {
@@ -63,8 +66,9 @@ int main(int argc, char* argv[]) {
     brpc::FLAGS_circuit_breaker_long_window_error_percent = kLongWindowErrorPercent;
     brpc::FLAGS_circuit_breaker_min_isolation_duration_ms = kMinIsolationDurationMs;
     brpc::FLAGS_circuit_breaker_max_isolation_duration_ms = kMaxIsolationDurationMs;
+    brpc::FLAGS_circuit_breaker_half_open_window_size = kHalfWindowSize;
     testing::InitGoogleTest(&argc, argv);
-    GFLAGS_NS::ParseCommandLineFlags(&argc, &argv, true);
+    GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
     return RUN_ALL_TESTS();
 }
 
@@ -147,6 +151,60 @@ TEST_F(CircuitBreakerTest, should_not_isolate) {
     }
 }
 
+TEST_F(CircuitBreakerTest, canceled_requests_during_initialization) {
+    brpc::CircuitBreaker baseline;
+    for (int i = 0; i < 2 * kLongWindowSize; ++i) {
+        ASSERT_TRUE(_circuit_breaker.OnCallEnd(ECANCELED, kLatency));
+    }
+    EXPECT_EQ(0, _circuit_breaker.isolated_times());
+
+    // Cancellations must not advance initialization or consume its error budget.
+    bool healthy = true;
+    for (int i = 0; i < kLongWindowSize && healthy; ++i) {
+        healthy = baseline.OnCallEnd(kErrorCodeForFailed, kErrorCost);
+        ASSERT_EQ(healthy,
+                  _circuit_breaker.OnCallEnd(kErrorCodeForFailed, kErrorCost));
+    }
+    EXPECT_FALSE(healthy);
+    EXPECT_EQ(1, _circuit_breaker.isolated_times());
+}
+
+TEST_F(CircuitBreakerTest, canceled_requests_after_initialization) {
+    brpc::CircuitBreaker baseline;
+    for (int i = 0; i < 2 * kLongWindowSize; ++i) {
+        ASSERT_TRUE(baseline.OnCallEnd(0, kLatency));
+        ASSERT_TRUE(_circuit_breaker.OnCallEnd(0, kLatency));
+    }
+
+    // Interleaved cancellations must neither add error cost nor decay it
+    // like successful requests, regardless of their latency.
+    bool healthy = true;
+    for (int i = 0; i < 2 * kLongWindowSize && healthy; ++i) {
+        ASSERT_TRUE(_circuit_breaker.OnCallEnd(ECANCELED, 1));
+        ASSERT_TRUE(_circuit_breaker.OnCallEnd(ECANCELED, 100 * kLatency));
+        healthy = baseline.OnCallEnd(kErrorCodeForFailed, kErrorCost);
+        ASSERT_EQ(healthy,
+                  _circuit_breaker.OnCallEnd(kErrorCodeForFailed, kErrorCost));
+    }
+    EXPECT_FALSE(healthy);
+    EXPECT_EQ(1, _circuit_breaker.isolated_times());
+}
+
+TEST_F(CircuitBreakerTest, canceled_requests_in_half_open) {
+    GFLAGS_NAMESPACE::FlagSaver flag_saver;
+    brpc::FLAGS_circuit_breaker_half_open_window_size = 2;
+    _circuit_breaker.Reset();
+    ASSERT_TRUE(_circuit_breaker.OnCallEnd(0, kLatency));
+    for (int i = 0; i < 2 * kLongWindowSize; ++i) {
+        ASSERT_TRUE(_circuit_breaker.OnCallEnd(ECANCELED, kLatency));
+    }
+    EXPECT_EQ(0, _circuit_breaker.isolated_times());
+
+    // One successful probe is still missing: a real error must reopen it.
+    EXPECT_FALSE(_circuit_breaker.OnCallEnd(kErrorCodeForFailed, kErrorCost));
+    EXPECT_EQ(1, _circuit_breaker.isolated_times());
+}
+
 TEST_F(CircuitBreakerTest, should_isolate) {
     std::vector<pthread_t> thread_list;
     std::vector<std::unique_ptr<FeedbackControl>> fc_list;
@@ -158,6 +216,60 @@ TEST_F(CircuitBreakerTest, should_isolate) {
         EXPECT_GT(fc->_unhealthy_cnt, 0);
         EXPECT_FALSE(fc->_healthy);
     }
+}
+
+TEST_F(CircuitBreakerTest, should_isolate_with_half_open) {
+    std::vector<pthread_t> thread_list;
+    std::vector<std::unique_ptr<FeedbackControl>> fc_list;
+    StartFeedbackThread(&thread_list, &fc_list, 100);
+    int total_failed = 0;
+    for (int  i = 0; i < kThreadNum; ++i) {
+        void* ret_data = nullptr;
+        ASSERT_EQ(pthread_join(thread_list[i], &ret_data), 0);
+        FeedbackControl* fc = static_cast<FeedbackControl*>(ret_data);
+        EXPECT_GT(fc->_unhealthy_cnt, 0);
+        EXPECT_FALSE(fc->_healthy);
+        total_failed += fc->_unhealthy_cnt;
+    }
+    _circuit_breaker.Reset();
+
+    int total_failed1 = 0;
+    StartFeedbackThread(&thread_list, &fc_list, 100);
+    for (int  i = 0; i < kThreadNum; ++i) {
+        void* ret_data = nullptr;
+        ASSERT_EQ(pthread_join(thread_list[i], &ret_data), 0);
+        FeedbackControl* fc = static_cast<FeedbackControl*>(ret_data);
+        EXPECT_FALSE(fc->_healthy);
+        EXPECT_LE(fc->_healthy_cnt, kShortWindowSize);
+        EXPECT_GT(fc->_unhealthy_cnt, 0);
+        total_failed1 += fc->_unhealthy_cnt;
+    }
+
+    // Enable the half-open state.
+    // The first request cause _broken = true immediately.
+    brpc::FLAGS_circuit_breaker_half_open_window_size = 10;
+    _circuit_breaker.Reset();
+    int total_failed2 = 0;
+    StartFeedbackThread(&thread_list, &fc_list, 100);
+    for (int  i = 0; i < kThreadNum; ++i) {
+        void* ret_data = nullptr;
+        ASSERT_EQ(pthread_join(thread_list[i], &ret_data), 0);
+        FeedbackControl* fc = static_cast<FeedbackControl*>(ret_data);
+        EXPECT_FALSE(fc->_healthy);
+        EXPECT_LE(fc->_healthy_cnt, kShortWindowSize);
+        EXPECT_GT(fc->_unhealthy_cnt, 0);
+        total_failed2 += fc->_unhealthy_cnt;
+    }
+    brpc::FLAGS_circuit_breaker_half_open_window_size = 0;
+
+    EXPECT_EQ(kLongWindowSize * 2 * kThreadNum -
+                  kShortWindowSize *
+                      brpc::FLAGS_circuit_breaker_short_window_error_percent /
+                      100,
+              total_failed);
+
+    EXPECT_EQ(total_failed1, total_failed);
+    EXPECT_EQ(kLongWindowSize * 2 * kThreadNum, total_failed2);
 }
 
 TEST_F(CircuitBreakerTest, isolation_duration_grow_and_reset) {

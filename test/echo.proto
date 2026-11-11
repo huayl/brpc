@@ -27,6 +27,7 @@ message EchoRequest {
     optional bool close_fd = 3;
     optional int32 sleep_us = 4;
     optional int32 server_fail = 5;
+    optional string http_header = 6;
 };
 
 message EchoResponse {
@@ -65,6 +66,11 @@ service DownloadService {
     rpc DownloadFailed(HttpRequest) returns (HttpResponse);
 }
 
+service UploadService {
+    rpc Upload(HttpRequest) returns (HttpResponse);
+    rpc UploadFailed(HttpRequest) returns (HttpResponse);
+}
+
 service UserNamingService {
     rpc ListNames(HttpRequest) returns (HttpResponse);
     rpc Touch(HttpRequest) returns (HttpResponse);
@@ -77,6 +83,16 @@ service DiscoveryNamingService {
     rpc Renew(HttpRequest) returns (HttpResponse);
     rpc Cancel(HttpRequest) returns (HttpResponse);
 };
+
+service NacosNamingService {
+    rpc Login(HttpRequest) returns (HttpResponse);
+    rpc List(HttpRequest) returns (HttpResponse);
+};
+
+service HttpService {
+    rpc Head(HttpRequest) returns (HttpResponse);
+    rpc Expect(HttpRequest) returns (HttpResponse);
+}
 
 enum State0 {
     STATE0_NUM_0 = 0;
@@ -95,3 +111,8 @@ message Message1 {
 message Message2 {
     required State1 stat = 1;
 };
+
+message RecursiveMessage {
+  optional RecursiveMessage child = 1;
+  optional string data = 2;
+}

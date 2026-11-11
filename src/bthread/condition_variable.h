@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: 2015/12/14 21:26:26
 
@@ -47,7 +47,7 @@ public:
     typedef bthread_cond_t*         native_handler_type;
     
     ConditionVariable() {
-        CHECK_EQ(0, bthread_cond_init(&_cond, NULL));
+        CHECK_EQ(0, bthread_cond_init(&_cond, nullptr));
     }
     ~ConditionVariable() {
         CHECK_EQ(0, bthread_cond_destroy(&_cond));
@@ -61,6 +61,20 @@ public:
 
     void wait(std::unique_lock<bthread_mutex_t>& lock) {
         bthread_cond_wait(&_cond, lock.mutex());
+    }
+
+    template<typename Predicate>
+    void wait(std::unique_lock<bthread::Mutex>& lock, Predicate p) {
+        while (!p()) {
+            bthread_cond_wait(&_cond, lock.mutex()->native_handler());
+        }
+    }
+
+    template<typename Predicate>
+    void wait(std::unique_lock<bthread_mutex_t>& lock, Predicate p) {
+        while (!p()) {
+            bthread_cond_wait(&_cond, lock.mutex());
+        }
     }
 
     // Unlike std::condition_variable, we return ETIMEDOUT when time expires

@@ -82,7 +82,10 @@ inline size_t InputStream::cut_packed_pod(T* packed_pod) {
 
 template <typename T>
 inline T InputStream::cut_packed_pod() {
-    T packed_pod;
+    // Zero-initialize so a short read never returns an indeterminate value
+    // (reading one is UB), and mark the stream bad so the truncated input
+    // fails the parse instead of being consumed as a garbage value.
+    T packed_pod = T();
     if (_size >= (int)sizeof(T)) {
         packed_pod = *(T*)_data;
         _data = (const char*)_data + sizeof(T);
@@ -90,7 +93,10 @@ inline T InputStream::cut_packed_pod() {
         _popped_bytes += sizeof(T);
         return packed_pod;
     }
-    cutn(&packed_pod, sizeof(T));
+    if (cutn(&packed_pod, sizeof(T)) != sizeof(T)) {
+        set_bad();
+        return T();
+    }
     return packed_pod;
 }
     
@@ -128,42 +134,84 @@ struct IsoItemsHead {
 } __attribute__((__packed__));
 
 inline ObjectIterator UnparsedValue::as_object() {
-    return ObjectIterator(_stream, _size);
+    return ObjectIterator(_stream, _size, _depth + 1);
 }
 
 inline ArrayIterator UnparsedValue::as_array() {
-    return ArrayIterator(_stream, _size);
+    return ArrayIterator(_stream, _size, _depth + 1);
 }
 
 inline ISOArrayIterator UnparsedValue::as_iso_array() {
     return ISOArrayIterator(_stream, _size);
 }
 
-inline void ObjectIterator::init(InputStream* stream, size_t size) {
+inline void ObjectIterator::init(InputStream* stream, size_t size, size_t depth) {
+    _depth = depth;
     _field_count = 0;
     _stream = stream;
+    if (_depth > (size_t)MAX_DEPTH) {
+        // The input is nested too deep. Parsing it would recurse until the
+        // stack overflows (CWE-674), so fail like the serializer does when
+        // the nesting level exceeds MAX_DEPTH.
+        return set_bad();
+    }
     _expected_popped_bytes = _stream->popped_bytes() + sizeof(ItemsHead);
     _expected_popped_end = _stream->popped_bytes() + size;
+    // Every field head takes at least 2 bytes (FieldFixedHead), so a valid
+    // item_count never exceeds half of the remaining value size. The count
+    // is copied verbatim from the wire, reject inconsistent values instead
+    // of trusting them. Guard the size before reading ItemsHead so payloads
+    // shorter than the header are not read past their declared boundary.
+    // Note that these are wire-controlled inputs, so reject (set_bad) rather
+    // than CHECK-fatal, which would terminate the process.
+    if (size < sizeof(ItemsHead)) {
+        LOG(ERROR) << "buffer(size=" << size << ") is not enough";
+        return set_bad();
+    }
     ItemsHead items_head;
     if (_stream->cut_packed_pod(&items_head) != sizeof(ItemsHead)) {
-        CHECK(false) << "buffer(size=" << size << ") is not enough";
+        LOG(ERROR) << "buffer(size=" << size << ") is not enough";
+        return set_bad();
+    }
+    if (items_head.item_count > (size - sizeof(ItemsHead)) / 2) {
+        LOG(ERROR) << "inconsistent item_count(" << items_head.item_count
+                   << ") and value_size(" << size << ")";
         return set_bad();
     }
     _field_count = items_head.item_count;
     operator++();
 }
 
-inline void ArrayIterator::init(InputStream* stream, size_t size) {
+inline void ArrayIterator::init(InputStream* stream, size_t size, size_t depth) {
+    _depth = depth;
     _item_count = 0;
     _stream = stream;
+    if (_depth > (size_t)MAX_DEPTH) {
+        // The input is nested too deep. Parsing it would recurse until the
+        // stack overflows (CWE-674), so fail like the serializer does when
+        // the nesting level exceeds MAX_DEPTH.
+        return set_bad();
+    }
     _expected_popped_bytes = _stream->popped_bytes() + sizeof(ItemsHead);
     _expected_popped_end = _stream->popped_bytes() + size;
+    if (size < sizeof(ItemsHead)) {
+        LOG(ERROR) << "buffer(size=" << size << ") is not enough";
+        return set_bad();
+    }
     ItemsHead items_head;
     if (_stream->cut_packed_pod(&items_head) != sizeof(ItemsHead)) {
-        CHECK(false) << "buffer(size=" << size << ") is not enough";
+        LOG(ERROR) << "buffer(size=" << size << ") is not enough";
         return set_bad();
     }
     _item_count = items_head.item_count;
+    // The item count is read from the request and may be much larger than
+    // the actual payload. The generated code uses it to Reserve() memory for
+    // repeated protobuf fields, so cap it by the remaining bytes (each item
+    // occupies at least one byte) to avoid a huge preallocation.
+    const size_t remaining = size - sizeof(ItemsHead);
+    if (_item_count > remaining) {
+        _item_count = static_cast<uint32_t>(remaining);
+    }
     operator++();
 }
 
@@ -175,22 +223,26 @@ inline void ISOArrayIterator::init(InputStream* stream, size_t size) {
     _item_size = 0;
     _item_count = 0;
     _left_item_count = 0;
+    if (size < sizeof(IsoItemsHead)) {
+        LOG(ERROR) << "Not enough data";
+        return set_bad();
+    }
     IsoItemsHead items_head;
     if (_stream->cut_packed_pod(&items_head) != sizeof(IsoItemsHead)) {
-        CHECK(false) << "Not enough data";
+        LOG(ERROR) << "Not enough data";
         return set_bad();
     }
     _item_type = (PrimitiveFieldType)items_head.type;
     _item_size = get_primitive_type_size(_item_type);
     if (!_item_size) {
-        CHECK(false) << "type=" << type2str(_item_type)
+        LOG(ERROR) << "type=" << type2str(_item_type)
                    << " in primitive isoarray is not primitive";
         return set_bad();
     }
     const size_t items_full_size = size - sizeof(IsoItemsHead);
     _item_count = items_full_size / _item_size;
     if (_item_count * _item_size != items_full_size) {
-        CHECK(false) << "inconsistent item_count(" << _item_count
+        LOG(ERROR) << "inconsistent item_count(" << _item_count
                    << ") and value_size(" << items_full_size
                    << "), item_size=" << _item_size;
         return set_bad();
@@ -215,7 +267,7 @@ inline void ISOArrayIterator::operator++() {
     _buf_index = 0;
     if (_stream->cutn(_item_buf, _buf_count * _item_size) !=
         _buf_count * _item_size) {
-        CHECK(false) << "Not enough data";
+        LOG(ERROR) << "Not enough data";
         return set_bad();
     }
     _left_item_count -= _buf_count;

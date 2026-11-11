@@ -23,7 +23,9 @@ namespace brpc {
 
 ServerId2SocketIdMapper::ServerId2SocketIdMapper() {
     _tmp.reserve(128);
-    CHECK_EQ(0, _nref_map.init(128));
+    if (_nref_map.init(128) != 0) {
+        LOG(WARNING) << "Fail to init _nref_map";
+    }
 }
 
 ServerId2SocketIdMapper::~ServerId2SocketIdMapper() {
@@ -35,7 +37,7 @@ bool ServerId2SocketIdMapper::AddServer(const ServerId& server) {
 
 bool ServerId2SocketIdMapper::RemoveServer(const ServerId& server) {
     int* nref = _nref_map.seek(server.id);
-    if (nref == NULL) {
+    if (nref == nullptr) {
         LOG(ERROR) << "Unexist SocketId=" << server.id;
         return false;
     }

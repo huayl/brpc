@@ -30,22 +30,13 @@ Extension<T>* Extension<T>::instance() {
 }
 
 template <typename T>
-Extension<T>::Extension() {
-    _instance_map.init(29);
-}
-
-template <typename T>
-Extension<T>::~Extension() {
-}
-
-template <typename T>
 int Extension<T>::Register(const std::string& name, T* instance) {
-    if (NULL == instance) {
+    if (nullptr == instance) {
         LOG(ERROR) << "instance to \"" << name << "\" is NULL";
         return -1;
     }
     BAIDU_SCOPED_LOCK(_map_mutex);
-    if (_instance_map.seek(name) != NULL) {
+    if (_instance_map.seek(name) != nullptr) {
         LOG(ERROR) << "\"" << name << "\" was registered";
         return -1;
     }
@@ -63,15 +54,15 @@ int Extension<T>::RegisterOrDie(const std::string& name, T* instance) {
 
 template <typename T>
 T* Extension<T>::Find(const char* name) {
-    if (NULL == name) {
-        return NULL;
+    if (nullptr == name) {
+        return nullptr;
     }
     BAIDU_SCOPED_LOCK(_map_mutex);
     T** p = _instance_map.seek(name);
     if (p) {
         return *p;
     }
-    return NULL;
+    return nullptr;
 }
 
 template <typename T>

@@ -33,12 +33,16 @@ typedef Window<IntRecorder, SERIES_IN_SECOND> RecorderWindow;
 typedef Window<Maxer<int64_t>, SERIES_IN_SECOND> MaxWindow;
 typedef Window<Percentile, SERIES_IN_SECOND> PercentileWindow;
 
+// Round |dval| up with probability equal to its fractional part. |random|
+// must be in [0, 1); keeping it explicit makes the rule deterministic to test.
+int64_t double_to_random_int(double dval, double random);
+
 // NOTE: Always use int64_t in the interfaces no matter what the impl. is.
 
 class CDF : public Variable {
 public:
     explicit CDF(PercentileWindow* w);
-    ~CDF();
+    ~CDF() override;
     void describe(std::ostream& os, bool quote_string) const override;
     int describe_series(std::ostream& os, const SeriesOptions& options) const override;
 private:
@@ -77,7 +81,7 @@ class LatencyRecorder : public detail::LatencyRecorderBase {
 public:
     LatencyRecorder() : Base(-1) {}
     explicit LatencyRecorder(time_t window_size) : Base(window_size) {}
-    explicit LatencyRecorder(const butil::StringPiece& prefix) : Base(-1) {
+    LatencyRecorder(const butil::StringPiece& prefix) : Base(-1) {
         expose(prefix);
     }
     LatencyRecorder(const butil::StringPiece& prefix,
@@ -145,6 +149,14 @@ public:
     // Get |ratio|-ile latency in recent |window_size| seconds
     // E.g. 0.99 means 99%-ile
     int64_t latency_percentile(double ratio) const;
+
+    // The composite metric contract, see bvar/variable.h
+    // The five metrics below are five families of their own: nothing ties
+    // an average latency to a qps the way a bucket is tied to its count.
+    static const std::vector<MetricFamily>& list_metric_families();
+    bool dump_samples(Dumper* dumper, size_t family_index,
+                      const std::string& name,
+                      butil::StringPiece labels) const;
 
     // Get name of a sub-bvar.
     const std::string& latency_name() const { return _latency_window.name(); }

@@ -51,25 +51,50 @@ namespace brpc {
 // in `done'.
 class SelectiveChannel : public ChannelBase/*non-copyable*/ {
 public:
-    typedef SocketId ChannelHandle;
+    struct ChannelHandle {
+        SocketId id;
+        std::string tag;
+    };
+
+    struct SubChannelOptions {
+        std::string tag;
+        ChannelOwnership ownership = OWNS_CHANNEL;
+    };
 
     SelectiveChannel();
     ~SelectiveChannel();
 
     // You MUST initialize a schan before using it. `load_balancer_name' is the
     // name of load balancing algorithm which is listed in brpc/channel.h
-    // if `options' is NULL, use default options.
+    // if `options' is nullptr, use default options.
     int Init(const char* load_balancer_name, const ChannelOptions* options);
 
     // Add a sub channel, which will be deleted along with schan or explicitly
     // by RemoveAndDestroyChannel.
     // On success, handle is set with the key for removal.
+    //
+    // Ownership (single source of truth: the FIRST successful registration):
+    //   - OWNS_CHANNEL: schan owns sub_channel; caller must not delete it.
+    //   - DOESNT_OWN_CHANNEL: caller owns sub_channel and must delete it.
+    // On failure the same rule applies to the registration being created: schan
+    // deletes sub_channel iff its ownership is OWNS_CHANNEL.
+    // A duplicate sub_channel returns -1 and changes nothing; it stays owned as
+    // its first registration decided.
     // NOTE: Different from pchan, schan can add channels at any time.
     // Returns 0 on success, -1 otherwise.
-    int AddChannel(ChannelBase* sub_channel, ChannelHandle* handle);
+    int AddChannel(ChannelBase* sub_channel, ChannelHandle* handle) {
+        return AddChannel(sub_channel, SubChannelOptions(), handle);
+    }
+    int AddChannel(ChannelBase* sub_channel, const std::string& tag, ChannelHandle* handle) {
+        SubChannelOptions option;
+        option.tag = tag;
+        return AddChannel(sub_channel, option, handle);
+    }
+    int AddChannel(ChannelBase* sub_channel, const SubChannelOptions& option,
+                   ChannelHandle* handle);
 
     // Remove and destroy the sub_channel associated with `handle'.
-    void RemoveAndDestroyChannel(ChannelHandle handle);
+    void RemoveAndDestroyChannel(const ChannelHandle& handle);
 
     // Send request by a sub channel. schan may retry another sub channel
     // according to retrying/backup-request settings.

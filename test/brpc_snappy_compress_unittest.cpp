@@ -20,12 +20,14 @@
 // Date: 2015/01/20 19:01:06
 
 #include <gtest/gtest.h>
-#include "butil/gperftools_profiler.h"
+#include <gflags/gflags.h>
+#include "gperftools_helper.h"
 #include "butil/third_party/snappy/snappy.h"
 #include "butil/macros.h"
 #include "butil/iobuf.h"
 #include "butil/time.h"
 #include "snappy_message.pb.h"
+#include "brpc/compress.h"
 #include "brpc/policy/snappy_compress.h"
 #include "brpc/policy/gzip_compress.h"
 
@@ -101,6 +103,68 @@ TEST_F(test_compress_method, snappy_iobuf) {
     ASSERT_TRUE(brpc::policy::SnappyCompress(buf, &output_buf)); 
     ASSERT_TRUE(brpc::policy::SnappyDecompress(output_buf, &check_buf));
     ASSERT_STREQ(check_buf.to_string().c_str(), test);
+}
+
+TEST_F(test_compress_method, snappy_overlapping_copy) {
+    // Short offsets require successive copies to read bytes written by the
+    // preceding copy. Integer-pointer casts used for unaligned accesses cause
+    // Clang 18 -O2 to reuse a load and corrupt the overlapping copies.
+    for (size_t offset = 1; offset < 8; ++offset) {
+        SCOPED_TRACE(offset);
+        const std::string pattern = std::string("abcdefg").substr(0, offset);
+        const std::string suffix = "0123456789abcdef";
+        std::string expected = pattern;
+        for (size_t i = 0; i < 64; ++i) {
+            expected.push_back(pattern[i % offset]);
+        }
+        expected += suffix;
+
+        // Encode a literal, a 64-byte copy with a two-byte offset, and a
+        // trailing literal that leaves room for the fast copy path.
+        std::string compressed;
+        compressed.push_back(static_cast<char>(expected.size()));
+        compressed.push_back(static_cast<char>((offset - 1) << 2));
+        compressed += pattern;
+        compressed.push_back(static_cast<char>(0xfe));
+        compressed.push_back(static_cast<char>(offset));
+        compressed.push_back('\0');
+        compressed.push_back(static_cast<char>((suffix.size() - 1) << 2));
+        compressed += suffix;
+
+        std::string flat;
+        ASSERT_TRUE(butil::snappy::Uncompress(
+            compressed.data(), compressed.size(), &flat));
+        EXPECT_EQ(expected, flat);
+
+        butil::IOBuf input;
+        input.append(compressed);
+        butil::IOBuf first, second;
+        ASSERT_TRUE(brpc::policy::SnappyDecompress(input, &first));
+        ASSERT_TRUE(brpc::policy::SnappyDecompress(input, &second));
+        EXPECT_EQ(expected, first.to_string());
+        EXPECT_EQ(expected, second.to_string());
+    }
+}
+
+TEST_F(test_compress_method, snappy_repeated_pattern_across_blocks) {
+    const size_t block_size = butil::snappy::kBlockSize;
+    const size_t sizes[] = {
+        block_size - 1, block_size, block_size + 1, 2 * block_size + 17
+    };
+    const char pattern[] = {'a', '\0', 'b'};
+    for (size_t size : sizes) {
+        SCOPED_TRACE(size);
+        std::string expected;
+        for (size_t i = 0; i < size; ++i) {
+            expected.push_back(pattern[i % sizeof(pattern)]);
+        }
+        butil::IOBuf input, compressed, output;
+        input.append(expected);
+        ASSERT_TRUE(brpc::policy::SnappyCompress(input, &compressed));
+        ASSERT_TRUE(brpc::policy::SnappyDecompress(compressed, &output));
+        ASSERT_EQ(expected.size(), output.size());
+        ASSERT_TRUE(expected == output.to_string());
+    }
 }
 
 TEST_F(test_compress_method, mass_snappy) {
@@ -252,4 +316,34 @@ TEST_F(test_compress_method, mass_snappy_iobuf) {
     std::string check_str = check_buf.to_string();
     ASSERT_TRUE(strcmp(check_str.c_str(), text) == 0);
     delete [] text;
+}
+
+TEST_F(test_compress_method, decompressed_size_capped) {
+    // Regression test: decompressors used to enforce no output limit, so a
+    // small compressed body (checked against -max_body_size in compressed
+    // form only) could decompress to tens of GiB (decompression bomb).
+    GFLAGS_NAMESPACE::FlagSaver flag_saver;
+    brpc::FLAGS_max_decompressed_body_size = 1024;
+
+    butil::IOBuf raw;
+    raw.append(std::string(64 * 1024, '\0'));
+
+    butil::IOBuf gzipped;
+    ASSERT_TRUE(brpc::policy::GzipCompress(raw, &gzipped, nullptr));
+    butil::IOBuf out;
+    ASSERT_FALSE(brpc::policy::GzipDecompress(gzipped, &out));
+
+    butil::IOBuf snappied;
+    ASSERT_TRUE(brpc::policy::SnappyCompress(raw, &snappied));
+    out.clear();
+    ASSERT_FALSE(brpc::policy::SnappyDecompress(snappied, &out));
+
+    // Payloads under the cap still decompress fine.
+    brpc::FLAGS_max_decompressed_body_size = 1024 * 1024;
+    out.clear();
+    ASSERT_TRUE(brpc::policy::GzipDecompress(gzipped, &out));
+    ASSERT_EQ(raw.size(), out.size());
+    out.clear();
+    ASSERT_TRUE(brpc::policy::SnappyDecompress(snappied, &out));
+    ASSERT_EQ(raw.size(), out.size());
 }

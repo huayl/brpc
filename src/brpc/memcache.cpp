@@ -15,26 +15,25 @@
 // specific language governing permissions and limitations
 // under the License.
 
-
-#include <algorithm>
-#include <google/protobuf/reflection_ops.h>
-#include <google/protobuf/wire_format.h>
-#include "butil/string_printf.h"
-#include "butil/macros.h"
-#include "butil/sys_byteorder.h"
-#include "butil/logging.h"
 #include "brpc/memcache.h"
+
+#include <google/protobuf/io/coded_stream.h>
 #include "brpc/policy/memcache_binary_header.h"
+#include "brpc/proto_base.pb.h"
+#include "butil/logging.h"
+#include "butil/macros.h"
+#include "butil/string_printf.h"
+#include "butil/sys_byteorder.h"
 
 namespace brpc {
 
 MemcacheRequest::MemcacheRequest()
-    : ::google::protobuf::Message() {
+    : NonreflectableMessage<MemcacheRequest>() {
     SharedCtor();
 }
 
 MemcacheRequest::MemcacheRequest(const MemcacheRequest& from)
-    : ::google::protobuf::Message() {
+    : NonreflectableMessage<MemcacheRequest>(from) {
     SharedCtor();
     MergeFrom(from);
 }
@@ -55,20 +54,6 @@ void MemcacheRequest::SetCachedSize(int size) const {
     _cached_size_ = size;
 }
 
-const ::google::protobuf::Descriptor* MemcacheRequest::descriptor() {
-    return MemcacheRequestBase::descriptor();
-}
-
-MemcacheRequest* MemcacheRequest::New() const {
-    return new MemcacheRequest;
-}
-
-#if GOOGLE_PROTOBUF_VERSION >= 3006000
-MemcacheRequest* MemcacheRequest::New(::google::protobuf::Arena* arena) const {
-    return CreateMaybeMessage<MemcacheRequest>(arena);
-}
-#endif
-
 void MemcacheRequest::Clear() {
     _buf.clear();
     _pipelined_count = 0;
@@ -80,7 +65,7 @@ bool MemcacheRequest::MergePartialFromCodedStream(
     
     // simple approach just making it work.
     butil::IOBuf tmp;
-    const void* data = NULL;
+    const void* data = nullptr;
     int size = 0;
     while (input->GetDirectBufferPointer(&data, &size)) {
         tmp.append(data, size);
@@ -92,7 +77,7 @@ bool MemcacheRequest::MergePartialFromCodedStream(
         char aux_buf[sizeof(policy::MemcacheRequestHeader)];
         const policy::MemcacheRequestHeader* header =
             (const policy::MemcacheRequestHeader*)tmp.fetch(aux_buf, sizeof(aux_buf));
-        if (header == NULL) {
+        if (header == nullptr) {
             return false;
         }
         if (header->magic != (uint8_t)policy::MC_MAGIC_REQUEST) {
@@ -115,50 +100,23 @@ void MemcacheRequest::SerializeWithCachedSizes(
 
     // simple approach just making it work.
     butil::IOBufAsZeroCopyInputStream wrapper(_buf);
-    const void* data = NULL;
+    const void* data = nullptr;
     int size = 0;
     while (wrapper.Next(&data, &size)) {
         output->WriteRaw(data, size);
     }
 }
 
-::google::protobuf::uint8* MemcacheRequest::SerializeWithCachedSizesToArray(
-    ::google::protobuf::uint8* target) const {
-    return target;
-}
-
-int MemcacheRequest::ByteSize() const {
-    int total_size =  _buf.size();
+size_t MemcacheRequest::ByteSizeLong() const {
+    int total_size =  static_cast<int>(_buf.size());
     _cached_size_ = total_size;
     return total_size;
 }
 
-void MemcacheRequest::MergeFrom(const ::google::protobuf::Message& from) {
-    GOOGLE_CHECK_NE(&from, this);
-    const MemcacheRequest* source = dynamic_cast<const MemcacheRequest*>(&from);
-    if (source == NULL) {
-        ::google::protobuf::internal::ReflectionOps::Merge(from, this);
-    } else {
-        MergeFrom(*source);
-    }
-}
-
 void MemcacheRequest::MergeFrom(const MemcacheRequest& from) {
-    GOOGLE_CHECK_NE(&from, this);
+    CHECK_NE(&from, this);
     _buf.append(from._buf);
     _pipelined_count += from._pipelined_count;
-}
-
-void MemcacheRequest::CopyFrom(const ::google::protobuf::Message& from) {
-    if (&from == this) return;
-    Clear();
-    MergeFrom(from);
-}
-
-void MemcacheRequest::CopyFrom(const MemcacheRequest& from) {
-    if (&from == this) return;
-    Clear();
-    MergeFrom(from);
 }
 
 bool MemcacheRequest::IsInitialized() const {
@@ -174,19 +132,19 @@ void MemcacheRequest::Swap(MemcacheRequest* other) {
 }
 
 ::google::protobuf::Metadata MemcacheRequest::GetMetadata() const {
-    ::google::protobuf::Metadata metadata;
-    metadata.descriptor = MemcacheRequest::descriptor();
-    metadata.reflection = NULL;
+    ::google::protobuf::Metadata metadata{};
+    metadata.descriptor = MemcacheRequestBase::descriptor();
+    metadata.reflection = nullptr;
     return metadata;
 }
 
 MemcacheResponse::MemcacheResponse()
-    : ::google::protobuf::Message() {
+    : NonreflectableMessage<MemcacheResponse>() {
     SharedCtor();
 }
 
 MemcacheResponse::MemcacheResponse(const MemcacheResponse& from)
-    : ::google::protobuf::Message() {
+    : NonreflectableMessage<MemcacheResponse>(from) {
     SharedCtor();
     MergeFrom(from);
 }
@@ -205,20 +163,6 @@ void MemcacheResponse::SharedDtor() {
 void MemcacheResponse::SetCachedSize(int size) const {
     _cached_size_ = size;
 }
-const ::google::protobuf::Descriptor* MemcacheResponse::descriptor() {
-    return MemcacheResponseBase::descriptor();
-}
-
-MemcacheResponse* MemcacheResponse::New() const {
-    return new MemcacheResponse;
-}
-
-#if GOOGLE_PROTOBUF_VERSION >= 3006000
-MemcacheResponse*
-MemcacheResponse::New(::google::protobuf::Arena* arena) const {
-    return CreateMaybeMessage<MemcacheResponse>(arena);
-}
-#endif
 
 void MemcacheResponse::Clear() {
 }
@@ -228,7 +172,7 @@ bool MemcacheResponse::MergePartialFromCodedStream(
     LOG(WARNING) << "You're not supposed to parse a MemcacheResponse";
 
     // simple approach just making it work.
-    const void* data = NULL;
+    const void* data = nullptr;
     int size = 0;
     while (input->GetDirectBufferPointer(&data, &size)) {
         _buf.append(data, size);
@@ -243,52 +187,25 @@ void MemcacheResponse::SerializeWithCachedSizes(
     
     // simple approach just making it work.
     butil::IOBufAsZeroCopyInputStream wrapper(_buf);
-    const void* data = NULL;
+    const void* data = nullptr;
     int size = 0;
     while (wrapper.Next(&data, &size)) {
         output->WriteRaw(data, size);
     }
 }
 
-::google::protobuf::uint8* MemcacheResponse::SerializeWithCachedSizesToArray(
-    ::google::protobuf::uint8* target) const {
-    return target;
-}
-
-int MemcacheResponse::ByteSize() const {
-    int total_size = _buf.size();
+size_t MemcacheResponse::ByteSizeLong() const {
+    int total_size = static_cast<int>(_buf.size());
     _cached_size_ = total_size;
     return total_size;
 }
 
-void MemcacheResponse::MergeFrom(const ::google::protobuf::Message& from) {
-    GOOGLE_CHECK_NE(&from, this);
-    const MemcacheResponse* source = dynamic_cast<const MemcacheResponse*>(&from);
-    if (source == NULL) {
-        ::google::protobuf::internal::ReflectionOps::Merge(from, this);
-    } else {
-        MergeFrom(*source);
-    }
-}
-
 void MemcacheResponse::MergeFrom(const MemcacheResponse& from) {
-    GOOGLE_CHECK_NE(&from, this);
+    CHECK_NE(&from, this);
     _err = from._err;
     // responses of memcached according to their binary layout, should be
     // directly concatenatible.
     _buf.append(from._buf);
-}
-
-void MemcacheResponse::CopyFrom(const ::google::protobuf::Message& from) {
-    if (&from == this) return;
-    Clear();
-    MergeFrom(from);
-}
-
-void MemcacheResponse::CopyFrom(const MemcacheResponse& from) {
-    if (&from == this) return;
-    Clear();
-    MergeFrom(from);
 }
 
 bool MemcacheResponse::IsInitialized() const {
@@ -303,9 +220,9 @@ void MemcacheResponse::Swap(MemcacheResponse* other) {
 }
 
 ::google::protobuf::Metadata MemcacheResponse::GetMetadata() const {
-    ::google::protobuf::Metadata metadata;
-    metadata.descriptor = MemcacheResponse::descriptor();
-    metadata.reflection = NULL;
+    ::google::protobuf::Metadata metadata{};
+    metadata.descriptor = MemcacheResponseBase::descriptor();
+    metadata.reflection = nullptr;
     return metadata;
 }
 
@@ -506,10 +423,10 @@ bool MemcacheResponse::PopGet(
 // MUST NOT have key
 // MUST NOT have value
 bool MemcacheResponse::PopDelete() {
-    return PopStore(policy::MC_BINARY_DELETE, NULL);
+    return PopStore(policy::MC_BINARY_DELETE, nullptr);
 }
 bool MemcacheResponse::PopFlush() {
-    return PopStore(policy::MC_BINARY_FLUSH, NULL);
+    return PopStore(policy::MC_BINARY_FLUSH, nullptr);
 }
 
 struct StoreHeaderWithExtras {
@@ -584,6 +501,13 @@ bool MemcacheResponse::PopStore(uint8_t command, uint64_t* cas_value) {
     LOG_IF(ERROR, header.key_length != 0) << "STORE response must not have key";
     int value_size = (int)header.total_body_length - (int)header.extras_length
         - (int)header.key_length;
+    if (value_size < 0) {
+        // extras_length + key_length overrun the declared body. Drop exactly the
+        // declared message so that following pipelined responses stay aligned.
+        _buf.pop_front(sizeof(header) + header.total_body_length);
+        butil::string_printf(&_err, "value_size=%d is negative", value_size);
+        return false;
+    }
     if (header.status != (uint16_t)STATUS_SUCCESS) {
         _buf.pop_front(sizeof(header) + header.extras_length + header.key_length);
         _err.clear();

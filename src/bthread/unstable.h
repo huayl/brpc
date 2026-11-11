@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: Tue Jul 10 17:40:58 CST 2012
 
@@ -55,14 +55,15 @@ extern int bthread_timer_del(bthread_timer_t id);
 
 // Suspend caller thread until the file descriptor `fd' has `epoll_events'.
 // Returns 0 on success, -1 otherwise and errno is set.
-// NOTE: Due to an epoll bug(https://patchwork.kernel.org/patch/1970231),
+// NOTE: Due to an epoll
+// bug(https://web.archive.org/web/20150423184820/https://patchwork.kernel.org/patch/1970231/),
 // current implementation relies on EPOLL_CTL_ADD and EPOLL_CTL_DEL which
 // are not scalable, don't use bthread_fd_*wait functions in performance
 // critical scenario.
 extern int bthread_fd_wait(int fd, unsigned events);
 
 // Suspend caller thread until the file descriptor `fd' has `epoll_events'
-// or CLOCK_REALTIME reached `abstime' if abstime is not NULL.
+// or CLOCK_REALTIME reached `abstime' if abstime is not nullptr.
 // Returns 0 on success, -1 otherwise and errno is set.
 extern int bthread_fd_timedwait(int fd, unsigned epoll_events,
                                 const struct timespec* abstime);
@@ -78,11 +79,18 @@ extern int bthread_close(int fd);
 // Replacement of connect(2) in bthreads.
 extern int bthread_connect(int sockfd, const struct sockaddr* serv_addr,
                            socklen_t addrlen);
+// Suspend caller thread until connect(2) on `sockfd' succeeds
+// or CLOCK_REALTIME reached `abstime' if `abstime' is not nullptr.
+extern int bthread_timed_connect(int sockfd, const struct sockaddr* serv_addr,
+                                 socklen_t addrlen, const timespec* abstime);
 
 // Add a startup function that each pthread worker will run at the beginning
 // To run code at the end, use butil::thread_atexit()
 // Returns 0 on success, error code otherwise.
 extern int bthread_set_worker_startfn(void (*start_fn)());
+
+// Add a startup function with tag
+extern int bthread_set_tagged_worker_startfn(void (*start_fn)(bthread_tag_t));
 
 // Stop all bthread and worker pthreads.
 // You should avoid calling this function which may cause bthread after main()
@@ -117,6 +125,10 @@ extern int bthread_keytable_pool_destroy(bthread_keytable_pool_t*);
 // Put statistics of `pool' into `stat'.
 extern int bthread_keytable_pool_getstat(bthread_keytable_pool_t* pool,
                                          bthread_keytable_pool_stat_t* stat);
+
+// [RPC INTERNAL]
+// Return thread local keytable list length if exist.
+extern int get_thread_local_keytable_list_length(bthread_keytable_pool_t* pool);
 
 // [RPC INTERNAL]
 // Reserve at most `nfree' keytables with `key' pointing to data created by

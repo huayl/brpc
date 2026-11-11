@@ -46,6 +46,13 @@ public:
                           int /*column*/, const std::string& message) {
         LOG_AT(ERROR, filename.c_str(), line) << message;
     }
+
+#if GOOGLE_PROTOBUF_VERSION >= 5026000
+    void RecordError(absl::string_view filename, int line, int column,
+                     absl::string_view message) override {
+        LOG_AT(ERROR, filename.data(), line) << message;
+    }
+#endif
 };
 
 int PressClient::init() {
@@ -66,7 +73,7 @@ int PressClient::init() {
     }
     _method_descriptor = find_method_by_name(
         _options->service, _options->method, _importer);
-    if (NULL == _method_descriptor) {
+    if (nullptr == _method_descriptor) {
         LOG(ERROR) << "Fail to find method=" << _options->service << '.'
                    << _options->method;
         return -1;
@@ -85,22 +92,22 @@ void PressClient::call_method(brpc::Controller* cntl, Message* request,
 }
 
 RpcPress::RpcPress()
-    : _pbrpc_client(NULL)
+    : _pbrpc_client(nullptr)
     , _started(false)
     , _stop(false)
-    , _output_json(NULL) {
+    , _output_json(nullptr) {
 }
 
 RpcPress::~RpcPress() {
     if (_output_json) {
         fclose(_output_json);
-        _output_json = NULL;
+        _output_json = nullptr;
     }
     delete _importer;
 }
 
 int RpcPress::init(const PressOptions* options) {
-    if (NULL == options) {
+    if (nullptr == options) {
         LOG(ERROR) << "Param[options] is NULL" ;
         return -1;
     }
@@ -126,7 +133,7 @@ int RpcPress::init(const PressOptions* options) {
     }
     ImportErrorPrinter error_printer;
     _importer = new google::protobuf::compiler::Importer(&sourceTree, &error_printer);
-    if (_importer->Import(proto_file.c_str()) == NULL) {
+    if (_importer->Import(proto_file.c_str()) == nullptr) {
         LOG(ERROR) << "Fail to import " << proto_file;
         return -1;
     }
@@ -180,7 +187,7 @@ int RpcPress::init(const PressOptions* options) {
 
 void* RpcPress::sync_call_thread(void* arg) {
     ((RpcPress*)arg)->sync_client();
-    return NULL;
+    return nullptr;
 }
 
 void RpcPress::handle_response(brpc::Controller* cntl, 
@@ -188,7 +195,7 @@ void RpcPress::handle_response(brpc::Controller* cntl,
                                Message* response, 
                                int64_t start_time){
     if (!cntl->Failed()){
-        int64_t rpc_call_time_us = butil::gettimeofday_us() - start_time;
+        int64_t rpc_call_time_us = butil::cpuwide_time_us() - start_time;
         _latency_recorder << rpc_call_time_us;
 
         if (_output_json) {
@@ -222,13 +229,13 @@ void RpcPress::sync_client() {
     int64_t last_expected_time = butil::monotonic_time_ns();
     const int64_t interval = (int64_t) (1000000000L / req_rate);
     // the max tolerant delay between end_time and expected_time. 10ms or 10 intervals
-    int64_t max_tolerant_delay = std::max(10000000L, 10 * interval);    
+    int64_t max_tolerant_delay = std::max((int64_t) 10000000L, 10 * interval);    
     while (!_stop) {
         brpc::Controller* cntl = new brpc::Controller;
         msg_index = (msg_index + _options.test_thread_num) % _msgs.size();
         Message* request = _msgs[msg_index];
         Message* response = _pbrpc_client->get_output_message();
-        const int64_t start_time = butil::gettimeofday_us();
+        const int64_t start_time = butil::cpuwide_time_us();
         google::protobuf::Closure* done = brpc::NewCallback<
             RpcPress, 
             RpcPress*, 
@@ -260,7 +267,7 @@ int RpcPress::start() {
     _ttid.resize(_options.test_thread_num);
     int ret = 0;
     for (int i = 0; i < _options.test_thread_num; i++) {
-        if ((ret = pthread_create(&_ttid[i], NULL, sync_call_thread, this)) != 0) {
+        if ((ret = pthread_create(&_ttid[i], nullptr, sync_call_thread, this)) != 0) {
             LOG(ERROR) << "Fail to create sending threads";
             return -1;
         }
@@ -282,7 +289,7 @@ int RpcPress::stop() {
     }
     _stop = true;
     for (size_t i = 0; i < _ttid.size(); i++) {
-        pthread_join(_ttid[i], NULL);
+        pthread_join(_ttid[i], nullptr);
     }
     _info_thr.stop();
     return 0;

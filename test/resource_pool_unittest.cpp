@@ -25,6 +25,7 @@
 
 namespace {
 struct MyObject {};
+struct FreeChunkCountObject {};
 
 int nfoo_dtor = 0;
 struct Foo {
@@ -49,6 +50,10 @@ template <> struct ResourcePoolBlockMaxItem<MyObject> {
 
 template <> struct ResourcePoolFreeChunkMaxItem<MyObject> {
     static size_t value() { return 5; }
+};
+
+template <> struct ResourcePoolFreeChunkMaxItem<FreeChunkCountObject> {
+    static size_t value() { return 1; }
 };
 
 template <> struct ResourcePoolValidator<Foo> {
@@ -213,13 +218,6 @@ TEST_F(ResourcePoolTest, get_int) {
     
     tm.start();
     for (size_t i = 0; i < N; ++i) {
-        *(new int) = i;
-    }    
-    tm.stop();
-    printf("new a int takes %luns\n", tm.n_elapsed()/N);
-
-    tm.start();
-    for (size_t i = 0; i < N; ++i) {
         id.value = i;
         *ResourcePool<int>::unsafe_address_resource(id) = i;
     }
@@ -284,6 +282,43 @@ TEST_F(ResourcePoolTest, get_perf) {
     std::cout << describe_resources<SilentObj>() << std::endl;
 }
 
+struct FreeChunkCountArgs {
+    ResourceId<FreeChunkCountObject> first;
+    ResourceId<FreeChunkCountObject> second;
+};
+
+void* add_two_free_chunks(void* arg) {
+    FreeChunkCountArgs* args = static_cast<FreeChunkCountArgs*>(arg);
+    get_resource(&args->first);
+    get_resource(&args->second);
+    return_resource(args->first);
+    return_resource(args->second);
+    return nullptr;
+}
+
+TEST_F(ResourcePoolTest, free_chunk_count_tracks_push_and_pop) {
+    // Keep the main LocalPool alive so worker teardown does not clear chunks.
+    ResourceId<FreeChunkCountObject> guard = { 0 };
+    ASSERT_NE(nullptr, get_resource(&guard));
+    FreeChunkCountArgs args = { { 0 }, { 0 } };
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, nullptr, add_two_free_chunks, &args));
+    ASSERT_EQ(0, pthread_join(tid, nullptr));
+
+    ResourceId<FreeChunkCountObject> first = { 0 };
+    ResourceId<FreeChunkCountObject> second = { 0 };
+    ASSERT_NE(nullptr, get_resource(&first));
+    ASSERT_NE(nullptr, get_resource(&second));
+    ASSERT_TRUE(first == args.first || first == args.second);
+    ASSERT_TRUE(second == args.first || second == args.second);
+    ASSERT_NE(first, second);
+
+    return_resource(first);
+    return_resource(second);
+    return_resource(guard);
+    clear_resources<FreeChunkCountObject>();
+}
+
 struct D { int val[1]; };
 
 void* get_and_return_int(void*) {
@@ -331,7 +366,7 @@ void* get_and_return_int(void*) {
         printf("[%lu:%d] get<D>=%.1f return<D>=%.1f\n",
                pthread_self(), j, tm1.n_elapsed()/(double)N, tm2.n_elapsed()/(double)N);
     }
-    return NULL;
+    return nullptr;
 }
 
 void* new_and_delete_int(void*) {
@@ -367,29 +402,29 @@ void* new_and_delete_int(void*) {
                pthread_self(), j, tm1.n_elapsed()/(double)N, tm2.n_elapsed()/(double)N);
     }
     
-    return NULL;
+    return nullptr;
 }
 
 TEST_F(ResourcePoolTest, get_and_return_int_single_thread) {
-    get_and_return_int(NULL);
-    new_and_delete_int(NULL);
+    get_and_return_int(nullptr);
+    new_and_delete_int(nullptr);
 }
 
 TEST_F(ResourcePoolTest, get_and_return_int_multiple_threads) {
     pthread_t tid[16];
     for (size_t i = 0; i < ARRAY_SIZE(tid); ++i) {
-        ASSERT_EQ(0, pthread_create(&tid[i], NULL, get_and_return_int, NULL));
+        ASSERT_EQ(0, pthread_create(&tid[i], nullptr, get_and_return_int, nullptr));
     }
     for (size_t i = 0; i < ARRAY_SIZE(tid); ++i) {
-        pthread_join(tid[i], NULL);
+        pthread_join(tid[i], nullptr);
     }
 
     pthread_t tid2[16];
     for (size_t i = 0; i < ARRAY_SIZE(tid2); ++i) {
-        ASSERT_EQ(0, pthread_create(&tid2[i], NULL, new_and_delete_int, NULL));
+        ASSERT_EQ(0, pthread_create(&tid2[i], nullptr, new_and_delete_int, nullptr));
     }
     for (size_t i = 0; i < ARRAY_SIZE(tid2); ++i) {
-        pthread_join(tid2[i], NULL);
+        pthread_join(tid2[i], nullptr);
     }
 
     std::cout << describe_resources<D>() << std::endl;

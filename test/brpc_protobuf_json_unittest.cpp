@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <google/protobuf/text_format.h>
 #include "butil/iobuf.h"
@@ -26,7 +27,8 @@
 #include "butil/strings/string_util.h"
 #include "butil/third_party/rapidjson/rapidjson.h"
 #include "butil/time.h"
-#include "butil/gperftools_profiler.h"
+#include "butil/memory/scope_guard.h"
+#include "gperftools_helper.h"
 #include "json2pb/pb_to_json.h"
 #include "json2pb/json_to_pb.h"
 #include "json2pb/encode_decode.h"
@@ -36,6 +38,7 @@
 #include "addressbook.pb.h"
 #include "addressbook_encode_decode.pb.h"
 #include "addressbook_map.pb.h"
+#include "echo.pb.h"
 
 namespace {  // just for coding-style check
 
@@ -50,7 +53,7 @@ protected:
 
 inline int64_t gettimeofday_us() {
     timeval now;
-    gettimeofday(&now, NULL);
+    gettimeofday(&now, nullptr);
     return now.tv_sec * 1000000L + now.tv_usec;
 }
 
@@ -263,7 +266,7 @@ TEST_F(ProtobufJsonTest, json_to_pb_unicode_case) {
     ASSERT_TRUE(!info1.compare(info2));
     butil::IOBuf buf;
     butil::IOBufAsZeroCopyOutputStream stream(&buf); 
-    bool res = json2pb::ProtoMessageToJson(address_book, &stream, NULL);
+    bool res = json2pb::ProtoMessageToJson(address_book, &stream, nullptr);
     ASSERT_TRUE(res);
     butil::IOBufAsZeroCopyInputStream stream2(buf); 
     AddressBook address_book_test3;
@@ -497,6 +500,156 @@ TEST_F(ProtobufJsonTest, json_to_pb_expected_failed_case) {
     ASSERT_STREQ("Invalid value `23' for optional field `Content.uid' which SHOULD be string, Missing required field: Ext.databyte", error.data());
 }
 
+const int DEEP_RECURSION_TEST_DEPTH = 140000;
+
+TEST_F(ProtobufJsonTest, json_to_pb_unbounded_recursion) {
+    test::RecursiveMessage msg;
+
+    // Generate a deeply nested JSON string to trigger unbounded recursion.
+    const int recursion_depth = DEEP_RECURSION_TEST_DEPTH;
+    std::string nested_json = "";
+    for (int i = 0; i < recursion_depth; ++i) {
+        nested_json += "{\"child\":";
+    }
+    nested_json += "{\"data\":\"leaf\"}";
+    for (int i = 0; i < recursion_depth; ++i) {
+        nested_json += "}";
+    }
+
+    {
+        std::string error;
+        bool ret = json2pb::JsonToProtoMessage(nested_json, &msg, &error);
+        ASSERT_FALSE(ret);
+        ASSERT_EQ("Exceeded maximum recursion depth [RecursiveMessage]", error);
+    }
+    {
+        json2pb::ProtoJson2PbOptions options;
+        std::string error;
+        bool ret = json2pb::ProtoJsonToProtoMessage(nested_json, &msg, options, &error);
+        ASSERT_FALSE(ret);
+        ASSERT_NE(std::string::npos, error.find("INVALID_ARGUMENT"))
+            << "error=" << error;
+        ASSERT_TRUE(error.find("recursion") != std::string::npos ||
+                    error.find("nested") != std::string::npos ||
+                    error.find("too deep") != std::string::npos)
+            << "error=" << error;
+    }
+}
+
+TEST_F(ProtobufJsonTest, pb_to_json_unbounded_recursion) {
+    test::RecursiveMessage msg;
+
+    // Create a deeply nested protobuf message.
+    const int recursion_depth = DEEP_RECURSION_TEST_DEPTH;
+    test::RecursiveMessage* current = &msg;
+    std::vector<test::RecursiveMessage*> nodes;
+    nodes.reserve(recursion_depth);
+    for (int i = 0; i < recursion_depth; ++i) {
+        nodes.push_back(current);
+        current = current->mutable_child();
+    }
+    current->set_data("leaf");
+
+    BRPC_SCOPE_EXIT {
+        // Release msg memory from end to start to avoid stack overflow.
+        for (size_t i = nodes.size() - 1; i > 0; --i) {
+            delete nodes[i]->release_child();
+        }
+    };
+
+    {
+        std::string json_output;
+        std::string error;
+        bool ret = json2pb::ProtoMessageToJson(msg, &json_output, &error);
+        ASSERT_FALSE(ret);
+        ASSERT_EQ("Exceeded maximum recursion depth", error);
+    }
+    {
+        std::string json_output;
+        std::string error;
+        json2pb::Pb2ProtoJsonOptions options;
+        bool ret = json2pb::ProtoMessageToProtoJson(msg, &json_output, options, &error);
+        ASSERT_FALSE(ret);
+        ASSERT_EQ("Exceeded maximum recursion depth", error);
+    }
+}
+
+TEST_F(ProtobufJsonTest, pb_parse_unbounded_recursion) {
+    auto generate_binary = [](int recursion_depth) {
+        // Innermost message: { data: "leaf" }
+        // data field: tag = (2<<3)|2 = 0x12, len=4, bytes "leaf"
+        const char kLeafRaw[] = "\x12\x04" "leaf";
+        const std::string leaf_msg(kLeafRaw, sizeof(kLeafRaw) - 1);
+
+        // Precompute sizes:
+        // S[0] = leaf size
+        // S[i] = 1 (tag 0x0A) + varint_len(S[i-1]) + S[i-1]
+        auto varint_len = [](size_t v) {
+            int n = 1;
+            while (v >= 128) { v >>= 7; ++n; }
+            return n;
+        };
+
+        std::vector<size_t> sizes;
+        sizes.reserve(recursion_depth + 1);
+        sizes.push_back(leaf_msg.size());
+        for (int i = 1; i <= recursion_depth; ++i) {
+            size_t inner = sizes[i-1];
+            sizes.push_back(1 + varint_len(inner) + inner);
+        }
+        const size_t final_size = sizes.back();
+
+        std::string out;
+        out.resize(final_size);
+        size_t off = 0;
+
+        // Emit outermost -> innermost wrappers: tag(0x0A) + varint(len(inner))
+        for (int depth = recursion_depth; depth >= 1; --depth) {
+            out[off++] = static_cast<char>(0x0A);  // tag for child
+            size_t len = sizes[depth - 1];
+            while (true) {
+                uint8_t byte = static_cast<uint8_t>(len & 0x7F);
+                len >>= 7;
+                if (len) byte |= 0x80;
+                out[off++] = static_cast<char>(byte);
+                if (!len) break;
+            }
+        }
+
+        // Copy leaf payload
+        memcpy(&out[off], leaf_msg.data(), leaf_msg.size());
+        off += leaf_msg.size();
+        return out;
+    };
+
+    // Test protobuf max depth limit (100).
+    {
+        test::RecursiveMessage msg;
+        std::string binary_data = generate_binary(100);
+        bool ret = msg.ParseFromString(binary_data);
+        ASSERT_TRUE(ret);
+        ASSERT_TRUE(msg.IsInitialized());
+
+        std::string error;
+        std::string json_output;
+        ret = json2pb::ProtoMessageToJson(msg, &json_output, &error);
+        ASSERT_TRUE(ret);
+        ASSERT_EQ("", error);
+    }
+    {
+        test::RecursiveMessage msg;
+        std::string binary_data = generate_binary(101);
+        bool ret = msg.ParseFromString(binary_data);
+        ASSERT_FALSE(ret);
+    }
+    {
+        test::RecursiveMessage msg;
+        std::string binary_data = generate_binary(DEEP_RECURSION_TEST_DEPTH);
+        bool ret = msg.ParseFromString(binary_data);
+        ASSERT_FALSE(ret);
+    }
+}
+
 TEST_F(ProtobufJsonTest, json_to_pb_perf_case) {
     
     std::string info3 = "{\"content\":[{\"distance\":1.0,\
@@ -505,8 +658,8 @@ TEST_F(ProtobufJsonTest, json_to_pb_perf_case) {
 
     printf("----------test json to pb performance------------\n\n");
 
-    std::string error; 
-  
+    std::string error;
+
     ProfilerStart("json_to_pb_perf.prof");
     butil::Timer timer;
     bool res;
@@ -542,8 +695,8 @@ TEST_F(ProtobufJsonTest, json_to_pb_encode_decode_perf_case) {
                           \"welcome\", \"enum--type\":1},\"uid*\":\"welcome\"}], \
                           \"judge\":false, \"spur\":2, \"data:array\":[]}";  
     printf("----------test json to pb encode/decode performance------------\n\n");
-    std::string error; 
-    
+    std::string error;
+
     ProfilerStart("json_to_pb_encode_decode_perf.prof");
     butil::Timer timer;
     bool res;
@@ -593,7 +746,7 @@ TEST_F(ProtobufJsonTest, json_to_pb_complex_perf_case) {
     json2pb::Json2PbOptions options;
     options.base64_to_bytes = false;
     ProfilerStart("json_to_pb_complex_perf.prof");
-    for (int i = 0; i < times; i++) { 
+    for (int i = 0; i < times; i++) {
         gss::message::gss_us_res_t data;
         butil::IOBufAsZeroCopyInputStream stream(buf); 
         timer.start();
@@ -625,7 +778,7 @@ TEST_F(ProtobufJsonTest, json_to_pb_to_string_complex_perf_case) {
     json2pb::Json2PbOptions options;
     options.base64_to_bytes = false;
     ProfilerStart("json_to_pb_to_string_complex_perf.prof");
-    for (int i = 0; i < times; i++) { 
+    for (int i = 0; i < times; i++) {
         gss::message::gss_us_res_t data;
         timer.start();
         res = json2pb::JsonToProtoMessage(info3, &data, options, &error);
@@ -678,7 +831,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_normal_case) {
     printf("----------test pb to json------------\n\n");
     json2pb::Pb2JsonOptions option;
     option.bytes_to_base64 = true;
-    bool ret = json2pb::ProtoMessageToJson(address_book, &info1, option, NULL);
+    bool ret = json2pb::ProtoMessageToJson(address_book, &info1, option, nullptr);
     ASSERT_TRUE(ret);
 
 #ifndef RAPIDJSON_VERSION_0_1
@@ -704,7 +857,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_normal_case) {
     {
         json2pb::Pb2JsonOptions option;
         option.bytes_to_base64 = true;
-        ret = ProtoMessageToJson(address_book, &info1, option, NULL);
+        ret = ProtoMessageToJson(address_book, &info1, option, nullptr);
     }
     ASSERT_TRUE(ret);
 
@@ -732,7 +885,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_normal_case) {
         json2pb::Pb2JsonOptions option;
         option.bytes_to_base64 = true;
         option.enum_option = json2pb::OUTPUT_ENUM_BY_NUMBER;
-        ret = ProtoMessageToJson(address_book, &info1, option, NULL);
+        ret = ProtoMessageToJson(address_book, &info1, option, nullptr);
     }
     ASSERT_TRUE(ret);
 
@@ -869,7 +1022,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode) {
     printf("----------test pb to json------------\n\n");
     json2pb::Pb2JsonOptions option;
     option.bytes_to_base64 = true;
-    ASSERT_TRUE(ProtoMessageToJson(json_data, &info1, option, NULL));
+    ASSERT_TRUE(ProtoMessageToJson(json_data, &info1, option, nullptr));
 #ifndef RAPIDJSON_VERSION_0_1
     ASSERT_STREQ("{\"info\":[\"this is json data's info\",\"this is a test\"],\"type\":80000,"
                  "\"data:array\":[200,300],\"judge\":true,\"spur\":3.45,\"@Content_Test%@\":"
@@ -889,8 +1042,8 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode) {
     
     std::string info3;
     JsonContextBodyEncDec data1;
-    json2pb::JsonToProtoMessage(info1, &data1, NULL);
-    json2pb::ProtoMessageToJson(data1, &info3, NULL);
+    json2pb::JsonToProtoMessage(info1, &data1, nullptr);
+    json2pb::ProtoMessageToJson(data1, &info3, nullptr);
     ASSERT_STREQ(info1.data(), info3.data());
 
     printf("----------test single repeated pb to json array------------\n\n");
@@ -910,7 +1063,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode) {
 
     std::string info4;
     option.single_repeated_to_array = false;
-    ASSERT_TRUE(ProtoMessageToJson(single_repeated_json_data, &info4, option, NULL));
+    ASSERT_TRUE(ProtoMessageToJson(single_repeated_json_data, &info4, option, nullptr));
 #ifndef RAPIDJSON_VERSION_0_1
     ASSERT_STREQ("{\"person\":["
                  "{\"name\":\"foo\",\"id\":1,\"json_body\":"
@@ -933,7 +1086,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode) {
 
     std::string info5;
     option.single_repeated_to_array = true;
-    ASSERT_TRUE(ProtoMessageToJson(single_repeated_json_data, &info5, option, NULL));
+    ASSERT_TRUE(ProtoMessageToJson(single_repeated_json_data, &info5, option, nullptr));
 #ifndef RAPIDJSON_VERSION_0_1
     ASSERT_STREQ("[{\"name\":\"foo\",\"id\":1,\"json_body\":"
                  "{\"info\":[\"this is json data's info\",\"this is a test\"],\"type\":80000,"
@@ -957,8 +1110,8 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode) {
     std::string info6;
     AddressBookEncDec data2;
     // object -> pb
-    json2pb::JsonToProtoMessage(info4, &data2, NULL);
-    json2pb::ProtoMessageToJson(data2, &info6, option, NULL);
+    json2pb::JsonToProtoMessage(info4, &data2, nullptr);
+    json2pb::ProtoMessageToJson(data2, &info6, option, nullptr);
 
     ASSERT_STREQ(info6.data(), info5.data());
 
@@ -967,13 +1120,13 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode) {
     json2pb::Json2PbOptions option2;
     option2.array_to_single_repeated = true;
     // array -> pb
-    json2pb::JsonToProtoMessage(info5, &data3, option2, NULL);
-    json2pb::ProtoMessageToJson(data3, &info7, option, NULL);
+    json2pb::JsonToProtoMessage(info5, &data3, option2, nullptr);
+    json2pb::ProtoMessageToJson(data3, &info7, option, nullptr);
     ASSERT_STREQ(info7.data(), info5.data());
 
     std::string info8;
     option.single_repeated_to_array = false;
-    json2pb::ProtoMessageToJson(data3, &info8, option, NULL);
+    json2pb::ProtoMessageToJson(data3, &info8, option, nullptr);
     ASSERT_STREQ(info8.data(), info4.data());
 }
 
@@ -984,7 +1137,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_control_char_case) {
  
     person->set_id(100);
     char ch = 0x01;
-    char* name = new char[17];
+    char name[17];
     memcpy(name, "baidu ", 6);
     name[6] = ch;
     char c = 0x08;
@@ -1031,7 +1184,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_control_char_case) {
     {
         json2pb::Pb2JsonOptions option;
         option.bytes_to_base64 = false;
-        ret = ProtoMessageToJson(address_book, &info1, option, NULL);
+        ret = ProtoMessageToJson(address_book, &info1, option, nullptr);
         ASSERT_TRUE(ret);
     }
 
@@ -1060,7 +1213,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_control_char_case) {
     {
         json2pb::Pb2JsonOptions option;
         option.bytes_to_base64 = true;
-        ret = ProtoMessageToJson(address_book, &info1, option, NULL);
+        ret = ProtoMessageToJson(address_book, &info1, option, nullptr);
         ASSERT_TRUE(ret);
     }
 
@@ -1090,7 +1243,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_control_char_case) {
         json2pb::Pb2JsonOptions option;
         option.enum_option = json2pb::OUTPUT_ENUM_BY_NUMBER;
         option.bytes_to_base64 = false;
-        ret = ProtoMessageToJson(address_book, &info1, option, NULL);
+        ret = ProtoMessageToJson(address_book, &info1, option, nullptr);
         ASSERT_TRUE(ret);
     }
 
@@ -1161,7 +1314,7 @@ TEST_F(ProtobufJsonTest, pb_to_json_unicode_case) {
     ASSERT_TRUE(ret);
     butil::IOBuf buf;
     butil::IOBufAsZeroCopyOutputStream stream(&buf); 
-    bool res = json2pb::ProtoMessageToJson(address_book, &stream, NULL);
+    bool res = json2pb::ProtoMessageToJson(address_book, &stream, nullptr);
     ASSERT_TRUE(res);
     ASSERT_TRUE(!info1.compare(buf.to_string()));
 }
@@ -1292,24 +1445,25 @@ TEST_F(ProtobufJsonTest, pb_to_json_perf_case) {
     printf("text:%s\n", text.data());
 
     printf("----------test pb to json performance------------\n\n");
+
     ProfilerStart("pb_to_json_perf.prof");
     butil::Timer timer;
     bool res;
     float avg_time1 = 0;
     float avg_time2 = 0;
     const int times = 100000;
-    ASSERT_TRUE(json2pb::ProtoMessageToJson(address_book, &info1, NULL));
+    ASSERT_TRUE(json2pb::ProtoMessageToJson(address_book, &info1, nullptr));
     for (int i = 0; i < times; i++) { 
         std::string info3;
         AddressBook data1;
         timer.start();
-        res = json2pb::JsonToProtoMessage(info1, &data1, NULL); 
+        res = json2pb::JsonToProtoMessage(info1, &data1, nullptr); 
         timer.stop();
         avg_time1 += timer.u_elapsed();
         ASSERT_TRUE(res);
         
         timer.start();
-        res = json2pb::ProtoMessageToJson(data1, &info3, NULL);
+        res = json2pb::ProtoMessageToJson(data1, &info3, nullptr);
         timer.stop();
         avg_time2 += timer.u_elapsed();
         ASSERT_TRUE(res);
@@ -1348,10 +1502,11 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode_perf_case) {
 
     printf("text:%s\n", text.data());
     
-    ASSERT_TRUE(json2pb::ProtoMessageToJson(json_data, &info1, NULL));
+    ASSERT_TRUE(json2pb::ProtoMessageToJson(json_data, &info1, nullptr));
 
     printf("----------test pb to json encode decode performance------------\n\n");
     ProfilerStart("pb_to_json_encode_decode_perf.prof");
+
     butil::Timer timer;
     bool res;
     float avg_time1 = 0;
@@ -1361,13 +1516,13 @@ TEST_F(ProtobufJsonTest, pb_to_json_encode_decode_perf_case) {
         std::string info3;
         JsonContextBody json_body;
         timer.start();
-        res = json2pb::JsonToProtoMessage(info1, &json_body, NULL); 
+        res = json2pb::JsonToProtoMessage(info1, &json_body, nullptr); 
         timer.stop();
         avg_time1 += timer.u_elapsed();
         ASSERT_TRUE(res);
         
         timer.start();
-        res = json2pb::ProtoMessageToJson(json_body, &info3, NULL);
+        res = json2pb::ProtoMessageToJson(json_body, &info3, nullptr);
         timer.stop();
         avg_time2 += timer.u_elapsed();
         ASSERT_TRUE(res);
@@ -1393,19 +1548,15 @@ TEST_F(ProtobufJsonTest, pb_to_json_complex_perf_case) {
 
     butil::Timer timer;
     bool res;
-    float avg_time1 = 0;
     float avg_time2 = 0;
     const int times = 10000;
     gss::message::gss_us_res_t data;
     json2pb::Json2PbOptions option;
     option.base64_to_bytes = false;
-    timer.start();
     res = JsonToProtoMessage(info3, &data, option, &error);
-    timer.stop();
-    avg_time1 += timer.u_elapsed();
     ASSERT_TRUE(res) << error;
     ProfilerStart("pb_to_json_complex_perf.prof");
-    for (int i = 0; i < times; i++) { 
+    for (int i = 0; i < times; i++) {
         std::string error1;
         timer.start();
         butil::IOBuf buf;
@@ -1433,19 +1584,15 @@ TEST_F(ProtobufJsonTest, pb_to_json_to_string_complex_perf_case) {
   
     butil::Timer timer;
     bool res;
-    float avg_time1 = 0;
     float avg_time2 = 0;
     const int times = 10000;
     gss::message::gss_us_res_t data;
     json2pb::Json2PbOptions option;
     option.base64_to_bytes = false;
-    timer.start();
     res = JsonToProtoMessage(info3, &data, option, &error);
-    timer.stop();
-    avg_time1 += timer.u_elapsed();
     ASSERT_TRUE(res);
     ProfilerStart("pb_to_json_to_string_complex_perf.prof");
-    for (int i = 0; i < times; i++) { 
+    for (int i = 0; i < times; i++) {
         std::string info4;  
         std::string error1;
         timer.start();
@@ -1541,6 +1688,101 @@ TEST_F(ProtobufJsonTest, string_to_int64) {
     json = R"({"name":"hello", "id":9, "data": 1234567, "datadouble":2.2, "datafloat":1.0})";
     ASSERT_TRUE(json2pb::JsonToProtoMessage(json, &person));
     ASSERT_EQ(person.data(), 1234567);
+}
+
+TEST_F(ProtobufJsonTest, parse_json_offset_at_eof) {
+    const struct {
+        const char* json;
+        size_t expected_offset;
+        bool array_to_single_repeated;
+    } cases[] = {
+        {"{}", 2, false},
+        {" \t{}", 4, false},
+        {R"({"person":[]})", 13, false},
+        {"[]", 2, true},
+        {"{} \n", 2, false},
+        {"{}{}", 2, false},
+    };
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.json);
+        json2pb::Json2PbOptions options;
+        options.allow_remaining_bytes_after_parsing = true;
+        options.array_to_single_repeated = test_case.array_to_single_repeated;
+        AddressBook message;
+        std::string error;
+        size_t offset = 0;
+        ASSERT_TRUE(json2pb::JsonToProtoMessage(
+            test_case.json, &message, options, &error, &offset)) << error;
+        EXPECT_EQ(test_case.expected_offset, offset);
+        EXPECT_TRUE(error.empty());
+
+        butil::IOBuf buf;
+        buf.append(test_case.json);
+        butil::IOBufAsZeroCopyInputStream stream(buf);
+        message.Clear();
+        offset = 0;
+        ASSERT_TRUE(json2pb::JsonToProtoMessage(
+            &stream, &message, options, &error, &offset)) << error;
+        EXPECT_EQ(test_case.expected_offset, offset);
+        EXPECT_TRUE(error.empty());
+    }
+}
+
+TEST_F(ProtobufJsonTest, parse_multiple_json_at_eof) {
+    const std::string jsons[] = {
+        R"({"message":"first"})",
+        R"({"message":"second"})",
+    };
+    const char* expected_messages[] = {"first", "second"};
+    std::string remaining = jsons[0] + jsons[1];
+    butil::IOBuf buf;
+    buf.append(remaining);
+    butil::IOBufAsZeroCopyInputStream stream(buf);
+    json2pb::ZeroCopyStreamReader reader(&stream);
+    json2pb::Json2PbOptions options;
+    options.allow_remaining_bytes_after_parsing = true;
+    test::EchoRequest message;
+    std::string error;
+    size_t string_offset = 0;
+    size_t stream_offset = 0;
+    size_t total_offset = 0;
+
+    for (size_t i = 0; i < 2; ++i) {
+        SCOPED_TRACE(i);
+        message.Clear();
+        ASSERT_TRUE(json2pb::JsonToProtoMessage(
+            remaining, &message, options, &error, &string_offset)) << error;
+        EXPECT_EQ(expected_messages[i], message.message());
+        EXPECT_EQ(jsons[i].size(), string_offset);
+        remaining = remaining.substr(string_offset);
+
+        message.Clear();
+        ASSERT_TRUE(json2pb::JsonToProtoMessage(
+            &reader, &message, options, &error, &stream_offset)) << error;
+        EXPECT_EQ(expected_messages[i], message.message());
+        total_offset += jsons[i].size();
+        EXPECT_EQ(total_offset, stream_offset);
+        EXPECT_EQ(total_offset, reader.Tell());
+    }
+    ASSERT_TRUE(remaining.empty());
+    // Seed outputs to verify that EOF parsing overwrites them.
+    message.Clear();
+    error = "previous error";
+    string_offset = std::numeric_limits<size_t>::max();
+    EXPECT_FALSE(json2pb::JsonToProtoMessage(
+        remaining, &message, options, &error, &string_offset));
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(0ul, string_offset);
+
+    message.Clear();
+    error = "previous error";
+    stream_offset = std::numeric_limits<size_t>::max();
+    EXPECT_FALSE(json2pb::JsonToProtoMessage(
+        &reader, &message, options, &error, &stream_offset));
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(total_offset, stream_offset);
+    EXPECT_EQ(total_offset, reader.Tell());
 }
 
 TEST_F(ProtobufJsonTest, parse_multiple_json) {
@@ -1644,6 +1886,109 @@ TEST_F(ProtobufJsonTest, parse_multiple_json_error) {
     ASSERT_FALSE(json2pb::JsonToProtoMessage(&reader, &req, copt, &err, &offset));
     ASSERT_STREQ("Invalid json: Invalid value. [Person]", err.c_str());
     ASSERT_EQ(47ul, offset);
+}
+
+TEST_F(ProtobufJsonTest, proto_json_to_pb) {
+    std::string error;
+    json2pb::ProtoJson2PbOptions options;
+
+    std::string json1 = R"({"addr":"baidu.com",)"
+                        R"("numbers":[{"key":"tel","value":123456},{"key":"cell","value":654321}]})";
+    AddressIntMapStd aims;
+    ASSERT_FALSE(json2pb::ProtoJsonToProtoMessage(json1, &aims, options, &error));
+    LOG(INFO) << "Fail to ProtoJsonToProtoMessage: " << error;
+
+    error.clear();
+    butil::IOBuf json_buf1;
+    json_buf1.append(json1);
+    butil::IOBufAsZeroCopyInputStream input_stream1(json_buf1);
+    ASSERT_FALSE(json2pb::ProtoJsonToProtoMessage(&input_stream1, &aims, options, &error));
+    LOG(INFO) << "Fail to ProtoJsonToProtoMessage: " << error;
+    error.clear();
+
+    std::string json2 = R"({"addr":"baidu.com",)"
+                        R"("numbers":{"tel":123456,"cell":654321}})";
+    ASSERT_TRUE(json2pb::ProtoJsonToProtoMessage(json2, &aims, options, &error)) << error;
+    ASSERT_TRUE(aims.has_addr());
+    ASSERT_EQ(aims.addr(), "baidu.com");
+    ASSERT_EQ(aims.numbers_size(), 2);
+    ASSERT_EQ(aims.numbers().at("tel"), 123456);
+    ASSERT_EQ(aims.numbers().at("cell"), 654321);
+
+    aims.Clear();
+    butil::IOBuf json_buf2;
+    json_buf2.append(json2);
+    butil::IOBufAsZeroCopyInputStream input_stream2(json_buf2);
+    ASSERT_TRUE(json2pb::ProtoJsonToProtoMessage(&input_stream2, &aims, options, &error)) << error;
+    ASSERT_TRUE(aims.has_addr());
+    ASSERT_EQ(aims.addr(), "baidu.com");
+    ASSERT_EQ(aims.numbers_size(), 2);
+    ASSERT_EQ(aims.numbers().at("tel"), 123456);
+    ASSERT_EQ(aims.numbers().at("cell"), 654321);
+
+    std::string json3 = R"({"addr":"baidu.com",)"
+                        R"("contacts":{"email":"frank@apache.org","office":"Shanghai"}})";
+    AddressStringMapStd asms;
+    ASSERT_TRUE(json2pb::ProtoJsonToProtoMessage(json3, &asms, options, &error)) << error;
+    ASSERT_TRUE(asms.has_addr());
+    ASSERT_EQ(asms.addr(), "baidu.com");
+    ASSERT_EQ(asms.contacts().size(), 2);
+    ASSERT_EQ(asms.contacts().at("email"), "frank@apache.org");
+    ASSERT_EQ(asms.contacts().at("office"), "Shanghai");
+
+    asms.Clear();
+    butil::IOBuf json_buf3;
+    json_buf3.append(json3);
+    butil::IOBufAsZeroCopyInputStream input_stream3(json_buf3);
+    ASSERT_TRUE(json2pb::ProtoJsonToProtoMessage(&input_stream3, &asms, options, &error)) << error;
+    ASSERT_TRUE(asms.has_addr());
+    ASSERT_EQ(asms.addr(), "baidu.com");
+    ASSERT_EQ(asms.contacts().size(), 2);
+    ASSERT_EQ(asms.contacts().at("email"), "frank@apache.org");
+    ASSERT_EQ(asms.contacts().at("office"), "Shanghai");
+}
+
+TEST_F(ProtobufJsonTest, pb_to_proto_json) {
+    std::string error;
+    json2pb::Pb2ProtoJsonOptions options;
+
+    AddressIntMapStd aims;
+    aims.set_addr("baidu.com");
+    (*aims.mutable_numbers())["tel"] = 123456;
+    (*aims.mutable_numbers())["cell"] = 654321;
+    std::string json1;
+    ASSERT_TRUE(json2pb::ProtoMessageToJson(aims, &json1)) << error;
+    ASSERT_NE(json1.find(R"("addr":"baidu.com")"), std::string::npos);
+    ASSERT_NE(json1.find(R"("cell":654321)"), std::string::npos);
+    ASSERT_NE(json1.find(R"("tel":123456)"), std::string::npos);
+
+    butil::IOBuf json_buf1;
+    json_buf1.append(json1);
+    butil::IOBufAsZeroCopyOutputStream output_stream1(&json_buf1);
+    ASSERT_TRUE(json2pb::ProtoMessageToJson(aims, &output_stream1, &error)) << error;
+    json1 = json_buf1.to_string();
+    ASSERT_NE(json1.find(R"("addr":"baidu.com")"), std::string::npos);
+    ASSERT_NE(json1.find(R"("cell":654321)"), std::string::npos);
+    ASSERT_NE(json1.find(R"("tel":123456)"), std::string::npos);
+
+    AddressStringMapStd asms;
+    asms.set_addr("baidu.com");
+    (*asms.mutable_contacts())["email"] = "frank@apache.org";
+    (*asms.mutable_contacts())["office"] = "Shanghai";
+    std::string json2;
+    ASSERT_TRUE(json2pb::ProtoMessageToJson(asms, &json2)) << error;
+    ASSERT_NE(json2.find(R"("addr":"baidu.com")"), std::string::npos);
+    ASSERT_NE(json2.find(R"("email":"frank@apache.org")"), std::string::npos);
+    ASSERT_NE(json2.find(R"("office":"Shanghai")"), std::string::npos);
+
+    butil::IOBuf json_buf2;
+    json_buf2.append(json2);
+    butil::IOBufAsZeroCopyOutputStream output_stream2(&json_buf2);
+    ASSERT_TRUE(json2pb::ProtoMessageToJson(asms, &output_stream2, &error)) << error;
+    json2 = json_buf2.to_string();
+    ASSERT_NE(json2.find(R"("addr":"baidu.com")"), std::string::npos);
+    ASSERT_NE(json2.find(R"("email":"frank@apache.org")"), std::string::npos);
+    ASSERT_NE(json2.find(R"("office":"Shanghai")"), std::string::npos);
 }
 
 } // namespace

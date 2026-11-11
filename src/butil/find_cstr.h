@@ -24,6 +24,7 @@
 #include <map>
 #include <algorithm>
 #include "butil/thread_local.h"
+#include "butil/debug/leak_annotations.h"
 
 // Find c-string in maps with std::string as keys without memory allocations.
 // Example:
@@ -57,6 +58,11 @@ struct StringMapThreadLocalTemp {
     }
 
     inline std::string* get_string(const char* key) {
+        // This thread-local string (and any buffer it reallocates) is reclaimed
+        // via thread_atexit when the thread exits. If a thread is still alive at
+        // leak-check time the allocation would be reported; it is a thread-local
+        // cache, so mark its allocations as intentional non-leaks.
+        ANNOTATE_SCOPED_MEMORY_LEAK;
         if (!initialized) {
             initialized = true;
             std::string* tmp = new (buf) std::string(key);
@@ -70,6 +76,8 @@ struct StringMapThreadLocalTemp {
     }
 
     inline std::string* get_string(const char* key, size_t length) {
+        // See the note in the other get_string overload.
+        ANNOTATE_SCOPED_MEMORY_LEAK;
         if (!initialized) {
             initialized = true;
             std::string* tmp = new (buf) std::string(key, length);
@@ -95,58 +103,58 @@ struct StringMapThreadLocalTemp {
     }
 };
 
-extern thread_local StringMapThreadLocalTemp tls_stringmap_temp;
+StringMapThreadLocalTemp& tls_stringmap_temp();
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::const_iterator
 find_cstr(const std::map<std::string, T, C, A>& m, const char* key) {
-    return m.find(*tls_stringmap_temp.get_string(key));
+    return m.find(*tls_stringmap_temp().get_string(key));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::iterator
 find_cstr(std::map<std::string, T, C, A>& m, const char* key) {
-    return m.find(*tls_stringmap_temp.get_string(key));
+    return m.find(*tls_stringmap_temp().get_string(key));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::const_iterator
 find_cstr(const std::map<std::string, T, C, A>& m,
           const char* key, size_t length) {
-    return m.find(*tls_stringmap_temp.get_string(key, length));
+    return m.find(*tls_stringmap_temp().get_string(key, length));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::iterator
 find_cstr(std::map<std::string, T, C, A>& m,
           const char* key, size_t length) {
-    return m.find(*tls_stringmap_temp.get_string(key, length));
+    return m.find(*tls_stringmap_temp().get_string(key, length));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::const_iterator
 find_lowered_cstr(const std::map<std::string, T, C, A>& m, const char* key) {
-    return m.find(*tls_stringmap_temp.get_lowered_string(key));
+    return m.find(*tls_stringmap_temp().get_lowered_string(key));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::iterator
 find_lowered_cstr(std::map<std::string, T, C, A>& m, const char* key) {
-    return m.find(*tls_stringmap_temp.get_lowered_string(key));
+    return m.find(*tls_stringmap_temp().get_lowered_string(key));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::const_iterator
 find_lowered_cstr(const std::map<std::string, T, C, A>& m,
                   const char* key, size_t length) {
-    return m.find(*tls_stringmap_temp.get_lowered_string(key, length));
+    return m.find(*tls_stringmap_temp().get_lowered_string(key, length));
 }
 
 template <typename T, typename C, typename A>
 typename std::map<std::string, T, C, A>::iterator
 find_lowered_cstr(std::map<std::string, T, C, A>& m,
                   const char* key, size_t length) {
-    return m.find(*tls_stringmap_temp.get_lowered_string(key, length));
+    return m.find(*tls_stringmap_temp().get_lowered_string(key, length));
 }
 
 }  // namespace butil

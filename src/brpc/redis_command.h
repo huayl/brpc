@@ -43,6 +43,12 @@ butil::Status RedisCommandByComponents(butil::IOBuf* buf,
                                       const butil::StringPiece* components,
                                       size_t num_components);
 
+enum RedisCommandConsumeState {
+    CONSUME_STATE_CONTINUE,
+    CONSUME_STATE_DONE,
+    CONSUME_STATE_ERROR,
+};
+
 // A parser used to parse redis raw command.
 class RedisCommandParser {
 public:
@@ -53,14 +59,27 @@ public:
     // in `arena'.
     ParseError Consume(butil::IOBuf& buf, std::vector<butil::StringPiece>* args,
                        butil::Arena* arena);
+    size_t ParsedArgsSize();
 
 private:
     // Reset parser to the initial state.
     void Reset();
 
+    // Consume one arg from `buf'. 
+    // Return CONSUME_STATE_CONTINUE if the parser needs more data. 
+    // Return CONSUME_STATE_DONE if the parser has parsed a complete command.
+    // Return CONSUME_STATE_ERROR if the parser meets an error.
+    RedisCommandConsumeState ConsumeImpl(butil::IOBuf& buf,
+                                         butil::Arena* arena,
+                                         ParseError* err);
+
     bool _parsing_array;            // if the parser has met array indicator '*'
     int _length;                    // array length
     int _index;                     // current parsing array index
+    // Bytes of string payload allocated in the arena for the command being
+    // parsed. It is bounded by -redis_max_allocation_size and reset once the
+    // command is complete.
+    size_t _used_bytes;
     std::vector<butil::StringPiece> _args;  // parsed command string
 };
 

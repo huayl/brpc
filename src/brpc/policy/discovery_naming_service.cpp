@@ -27,6 +27,7 @@
 #include "brpc/channel.h"
 #include "brpc/controller.h"
 #include "brpc/policy/discovery_naming_service.h"
+#include "brpc/policy/naming_service_json.h"
 
 namespace brpc {
 namespace policy {
@@ -47,7 +48,7 @@ DEFINE_int32(discovery_reregister_threshold, 3, "The renew error threshold beyon
         " which Register would be called again");
 
 static pthread_once_t s_init_discovery_channel_once = PTHREAD_ONCE_INIT;
-static Channel* s_discovery_channel = NULL;
+static Channel* s_discovery_channel = nullptr;
 
 static int ListDiscoveryNodes(const char* discovery_api_addr, std::string* servers) {
     Channel api_channel;
@@ -61,7 +62,7 @@ static int ListDiscoveryNodes(const char* discovery_api_addr, std::string* serve
     }
     Controller cntl;
     cntl.http_request().uri() = discovery_api_addr;
-    api_channel.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+    api_channel.CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
     if (cntl.Failed()) {
         LOG(FATAL) << "Fail to access " << cntl.http_request().uri()
                    << ": " << cntl.ErrorText();
@@ -72,7 +73,10 @@ static int ListDiscoveryNodes(const char* discovery_api_addr, std::string* serve
 
     const std::string response = cntl.response_attachment().to_string();
     BUTIL_RAPIDJSON_NAMESPACE::Document d;
-    d.Parse(response.c_str());
+    if (!ParseNamingServiceJson(response, &d)) {
+        LOG(ERROR) << "Fail to parse response of discovery nodes as json";
+        return -1;
+    }
     if (!d.IsObject()) {
         LOG(ERROR) << "Fail to parse " << response << " as json object";
         return -1;
@@ -89,6 +93,9 @@ static int ListDiscoveryNodes(const char* discovery_api_addr, std::string* serve
     }
     for (BUTIL_RAPIDJSON_NAMESPACE::SizeType i = 0; i < data.Size(); ++i) {
         const BUTIL_RAPIDJSON_NAMESPACE::Value& addr_item = data[i];
+        if (!addr_item.IsObject()) {
+            continue;
+        }
         auto itr_addr = addr_item.FindMember("addr");
         auto itr_status = addr_item.FindMember("status");
         if (itr_addr == addr_item.MemberEnd() ||
@@ -131,6 +138,12 @@ inline Channel* GetOrNewDiscoveryChannel() {
     return s_discovery_channel;
 }
 
+void ResetDiscoveryChannelForTesting() {
+    delete s_discovery_channel;
+    s_discovery_channel = nullptr;
+    s_init_discovery_channel_once = PTHREAD_ONCE_INIT;
+}
+
 bool DiscoveryRegisterParam::IsValid() const {
     return !appid.empty() && !hostname.empty() && !addrs.empty() &&
             !env.empty() && !zone.empty() && !version.empty();
@@ -143,7 +156,7 @@ DiscoveryClient::DiscoveryClient()
 DiscoveryClient::~DiscoveryClient() {
     if (_registered.load(butil::memory_order_acquire)) {
         bthread_stop(_th);
-        bthread_join(_th, NULL);
+        bthread_join(_th, nullptr);
         DoCancel();
     }
 }
@@ -151,7 +164,10 @@ DiscoveryClient::~DiscoveryClient() {
 static int ParseCommonResult(const butil::IOBuf& buf, std::string* error_text) {
     const std::string s = buf.to_string();
     BUTIL_RAPIDJSON_NAMESPACE::Document d;
-    d.Parse(s.c_str());
+    if (!ParseNamingServiceJson(s, &d)) {
+        LOG(ERROR) << "Fail to parse " << buf << " as json";
+        return -1;
+    }
     if (!d.IsObject()) {
         LOG(ERROR) << "Fail to parse " << buf << " as json object";
         return -1;
@@ -193,7 +209,7 @@ int DiscoveryClient::DoRenew() const {
         << "&region=" << _params.region
         << "&zone=" << _params.zone;
     os.move_to(cntl.request_attachment());
-    chan.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+    chan.CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
     if (cntl.Failed()) {
         LOG(ERROR) << "Fail to post /discovery/renew: " << cntl.ErrorText();
         return -1;
@@ -214,7 +230,7 @@ void* DiscoveryClient::PeriodicRenew(void* arg) {
         butil::fast_rand_less_than(FLAGS_discovery_renew_interval_s / 2);
     if (bthread_usleep(init_sleep_s * 1000000) != 0) {
         if (errno == ESTOP) {
-            return NULL;
+            return nullptr;
         }
     }
 
@@ -237,7 +253,7 @@ void* DiscoveryClient::PeriodicRenew(void* arg) {
         consecutive_renew_error = 0;
         bthread_usleep(FLAGS_discovery_renew_interval_s * 1000000);
     }
-    return NULL;
+    return nullptr;
 }
 
 int DiscoveryClient::Register(const DiscoveryRegisterParam& params) {
@@ -253,7 +269,7 @@ int DiscoveryClient::Register(const DiscoveryRegisterParam& params) {
     if (DoRegister() != 0) {
         return -1;
     }
-    if (bthread_start_background(&_th, NULL, PeriodicRenew, this) != 0) {
+    if (bthread_start_background(&_th, nullptr, PeriodicRenew, this) != 0) {
         LOG(ERROR) << "Fail to start background PeriodicRenew";
         return -1;
     }
@@ -262,7 +278,7 @@ int DiscoveryClient::Register(const DiscoveryRegisterParam& params) {
 
 int DiscoveryClient::DoRegister() {
     Channel* chan = GetOrNewDiscoveryChannel();
-    if (NULL == chan) {
+    if (nullptr == chan) {
         LOG(ERROR) << "Fail to create discovery channel";
         return -1;
     }
@@ -289,7 +305,7 @@ int DiscoveryClient::DoRegister() {
         << "&version=" << _params.version
         << "&metadata=" << _params.metadata;
     os.move_to(cntl.request_attachment());
-    chan->CallMethod(NULL, &cntl, NULL, NULL, NULL);
+    chan->CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
     if (cntl.Failed()) {
         LOG(ERROR) << "Fail to register " << _params.appid << ": " << cntl.ErrorText();
         return -1;
@@ -327,7 +343,7 @@ int DiscoveryClient::DoCancel() const {
         << "&region=" << _params.region
         << "&zone=" << _params.zone;
     os.move_to(cntl.request_attachment());
-    chan.CallMethod(NULL, &cntl, NULL, NULL, NULL);
+    chan.CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
     if (cntl.Failed()) {
         LOG(ERROR) << "Fail to post /discovery/cancel: " << cntl.ErrorText();
         return -1;
@@ -345,14 +361,14 @@ int DiscoveryClient::DoCancel() const {
 
 int DiscoveryNamingService::GetServers(const char* service_name,
                                        std::vector<ServerNode>* servers) {
-    if (service_name == NULL || *service_name == '\0' ||
+    if (service_name == nullptr || *service_name == '\0' ||
         FLAGS_discovery_env.empty() ||
         FLAGS_discovery_status.empty()) {
         LOG_ONCE(ERROR) << "Invalid parameters";
         return -1;
     }
     Channel* chan = GetOrNewDiscoveryChannel();
-    if (NULL == chan) {
+    if (nullptr == chan) {
         LOG(ERROR) << "Fail to create discovery channel";
         return -1;
     }
@@ -366,7 +382,7 @@ int DiscoveryNamingService::GetServers(const char* service_name,
         uri_str.append(FLAGS_discovery_zone);
     }
     cntl.http_request().uri() = uri_str;
-    chan->CallMethod(NULL, &cntl, NULL, NULL, NULL);
+    chan->CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
     if (cntl.Failed()) {
         LOG(ERROR) << "Fail to get /discovery/fetchs: " << cntl.ErrorText();
         return -1;
@@ -374,7 +390,10 @@ int DiscoveryNamingService::GetServers(const char* service_name,
 
     const std::string response = cntl.response_attachment().to_string();
     BUTIL_RAPIDJSON_NAMESPACE::Document d;
-    d.Parse(response.c_str());
+    if (!ParseNamingServiceJson(response, &d)) {
+        LOG(ERROR) << "Fail to parse response of /discovery/fetchs as json";
+        return -1;
+    }
     if (!d.IsObject()) {
         LOG(ERROR) << "Fail to parse " << response << " as json object";
         return -1;
@@ -385,12 +404,21 @@ int DiscoveryNamingService::GetServers(const char* service_name,
         return -1;
     }
     const BUTIL_RAPIDJSON_NAMESPACE::Value& data = itr_data->value;
+    if (!data.IsObject()) {
+        LOG(ERROR) << "data field for service " << service_name
+                   << " is not a json object";
+        return -1;
+    }
     auto itr_service = data.FindMember(service_name);
     if (itr_service == data.MemberEnd()) {
         LOG(ERROR) << "No " << service_name << " field in discovery response";
         return -1;
     }
     const BUTIL_RAPIDJSON_NAMESPACE::Value& services = itr_service->value;
+    if (!services.IsObject()) {
+        LOG(ERROR) << "Service " << service_name << " is not a json object";
+        return -1;
+    }
     auto itr_instances = services.FindMember("instances");
     if (itr_instances == services.MemberEnd()) {
         LOG(ERROR) << "Fail to find instances";
@@ -403,6 +431,11 @@ int DiscoveryNamingService::GetServers(const char* service_name,
     }
 
     for (BUTIL_RAPIDJSON_NAMESPACE::SizeType i = 0; i < instances.Size(); ++i) {
+        if (!instances[i].IsObject()) {
+            LOG(ERROR) << "instance[" << i << "] for service " << service_name
+                       << " is not a json object";
+            continue;
+        }
         std::string metadata;
         // convert metadata in object to string
         auto itr_metadata = instances[i].FindMember("metadata");

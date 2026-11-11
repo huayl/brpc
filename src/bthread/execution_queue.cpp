@@ -15,15 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: 2016/04/16 18:43:24
 
 #include "bthread/execution_queue.h"
 
 #include "butil/memory/singleton_on_pthread_once.h"
-#include "butil/object_pool.h"           // butil::get_object
 #include "butil/resource_pool.h"         // butil::get_resource
+#include "butil/threading/platform_thread.h"
 
 namespace bthread {
 
@@ -66,25 +66,27 @@ inline ExecutionQueueVars* get_execq_vars() {
 }
 
 void ExecutionQueueBase::start_execute(TaskNode* node) {
-    node->next = TaskNode::UNCONNECTED;
-    node->status = UNEXECUTED;
+    node->next.store(TaskNode::UNCONNECTED, butil::memory_order_relaxed);
+    node->status = TaskNode::UNEXECUTED;
     node->iterated = false;
     if (node->high_priority) {
         // Add _high_priority_tasks before pushing this task into queue to
         // make sure that _execute_tasks sees the newest number when this 
-        // task is in the queue. Althouth there might be some useless for 
+        // task is in the queue. Although there might be some useless for 
         // loops in _execute_tasks if this thread is scheduled out at this 
         // point, we think it's just fine.
         _high_priority_tasks.fetch_add(1, butil::memory_order_relaxed);
     }
-    TaskNode* const prev_head = _head.exchange(node, butil::memory_order_release);
-    if (prev_head != NULL) {
-        node->next = prev_head;
+    // Publish the task, and acquire the previous executor's state when
+    // taking ownership of an idle queue.
+    TaskNode* prev_head = _head.exchange(node, butil::memory_order_acq_rel);
+    if (prev_head != nullptr) {
+        node->next.store(prev_head, butil::memory_order_release);
         return;
     }
     // Get the right to execute the task, start a bthread to avoid deadlock
     // or stack overflow
-    node->next = NULL;
+    node->next.store(nullptr, butil::memory_order_relaxed);
     node->q = this;
 
     ExecutionQueueVars* const vars = get_execq_vars();
@@ -105,16 +107,34 @@ void ExecutionQueueBase::start_execute(TaskNode* node) {
     }
 
     if (nullptr == _options.executor) {
-        bthread_t tid;
-        // We start the execution thread in background instead of foreground as
-        // we can't determine whether the code after execute() is urgent (like
-        // unlock a pthread_mutex_t) in which case implicit context switch may
-        // cause undefined behavior (e.g. deadlock)
-        if (bthread_start_background(&tid, &_options.bthread_attr,
-                                     _execute_tasks, node) != 0) {
-            PLOG(FATAL) << "Fail to start bthread";
-            _execute_tasks(node);
+        if (_options.use_pthread) {
+            if (_pthread_started) {
+                BAIDU_SCOPED_LOCK(_mutex);
+                _current_head = node;
+                _cond.Signal();
+            } else {
+                // Start the execution bthread in background once.
+                if (pthread_create(&_pid, nullptr,
+                                   _execute_tasks_pthread,
+                                   node) != 0) {
+                    PLOG(FATAL) << "Fail to create pthread";
+                    _execute_tasks(node);
+                }
+                _pthread_started = true;
+            }
+        } else {
+            bthread_t tid;
+            // We start the execution bthread in background instead of foreground as
+            // we can't determine whether the code after execute() is urgent (like
+            // unlock a pthread_mutex_t) in which case implicit context switch may
+            // cause undefined behavior (e.g. deadlock)
+            if (bthread_start_background(&tid, &_options.bthread_attr,
+                _execute_tasks, node) != 0) {
+                PLOG(FATAL) << "Fail to start bthread";
+                _execute_tasks(node);
+            }
         }
+
     } else {
         if (_options.executor->submit(_execute_tasks, node) != 0) {
             PLOG(FATAL) << "Fail to submit task";
@@ -127,13 +147,13 @@ void* ExecutionQueueBase::_execute_tasks(void* arg) {
     ExecutionQueueVars* vars = get_execq_vars();
     TaskNode* head = (TaskNode*)arg;
     ExecutionQueueBase* m = (ExecutionQueueBase*)head->q;
-    TaskNode* cur_tail = NULL;
+    TaskNode* cur_tail = nullptr;
     bool destroy_queue = false;
     for (;;) {
         if (head->iterated) {
-            CHECK(head->next != NULL);
+            CHECK(head->next.load(butil::memory_order_relaxed) != nullptr);
             TaskNode* saved_head = head;
-            head = head->next;
+            head = head->next.load(butil::memory_order_relaxed);
             m->return_task_node(saved_head);
         }
         int rc = 0;
@@ -148,20 +168,22 @@ void* ExecutionQueueBase::_execute_tasks(void* arg) {
                 sched_yield();
             }
         } else {
-            rc = m->_execute(head, false, NULL);
+            rc = m->_execute(head, false, nullptr);
         }
         if (rc == ESTOP) {
             destroy_queue = true;
         }
         // Release TaskNode until uniterated task or last task
-        while (head->next != NULL && head->iterated) {
+        while (head->next.load(butil::memory_order_relaxed) != nullptr &&
+               head->iterated) {
             TaskNode* saved_head = head;
-            head = head->next;
+            head = head->next.load(butil::memory_order_relaxed);
             m->return_task_node(saved_head);
         }
-        if (cur_tail == NULL) {
-            for (cur_tail = head; cur_tail->next != NULL; 
-                    cur_tail = cur_tail->next) {}
+        if (cur_tail == nullptr) {
+            for (cur_tail = head;
+                 cur_tail->next.load(butil::memory_order_relaxed) != nullptr;
+                 cur_tail = cur_tail->next.load(butil::memory_order_relaxed)) {}
         }
         // break when no more tasks and head has been executed
         if (!m->_more_tasks(cur_tail, &cur_tail, !head->iterated)) {
@@ -172,21 +194,43 @@ void* ExecutionQueueBase::_execute_tasks(void* arg) {
         }
     }
     if (destroy_queue) {
-        CHECK(m->_head.load(butil::memory_order_relaxed) == NULL);
+        CHECK(m->_head.load(butil::memory_order_relaxed) == nullptr);
         CHECK(m->_stopped);
         // Add _join_butex by 2 to make it equal to the next version of the
         // ExecutionQueue from the same slot so that join with old id would
-        // return immediatly.
+        // return immediately.
         // 
-        // 1: release fence to make join sees the newst changes when it sees
-        //    the newst _join_butex
+        // 1: release fence to make join sees the newest changes when it sees
+        //    the newest _join_butex
         m->_join_butex->fetch_add(2, butil::memory_order_release/*1*/);
         butex_wake_all(m->_join_butex);
         vars->execq_count << -1;
         butil::return_resource(slot_of_id(m->_this_id));
     }
     vars->execq_active_count << -1;
-    return NULL;
+    return nullptr;
+}
+
+void* ExecutionQueueBase::_execute_tasks_pthread(void* arg) {
+    butil::PlatformThread::SetNameSimple("ExecutionQueue");
+    auto head = (TaskNode*)arg;
+    auto m = (ExecutionQueueBase*)head->q;
+    m->_current_head = head;
+    while (true) {
+        BAIDU_SCOPED_LOCK(m->_mutex);
+        while (!m->_current_head) {
+            m->_cond.Wait();
+        }
+        _execute_tasks(m->_current_head);
+        m->_current_head = nullptr;
+
+        int expected = _version_of_id(m->_this_id);
+        if (expected != m->_join_butex->load(butil::memory_order_relaxed)) {
+            // Execute queue has been stopped and stopped task has been executed, quit.
+            break;
+        }
+    }
+    return nullptr;
 }
 
 void ExecutionQueueBase::return_task_node(TaskNode* node) {
@@ -199,7 +243,7 @@ void ExecutionQueueBase::_on_recycle() {
     // Push a closed tasks
     while (true) {
         TaskNode* node = butil::get_object<TaskNode>();
-        if (BAIDU_LIKELY(node != NULL)) {
+        if (BAIDU_LIKELY(node != nullptr)) {
             get_execq_vars()->running_task_count << 1;
             node->stop_task = true;
             node->high_priority = false;
@@ -215,17 +259,21 @@ void ExecutionQueueBase::_on_recycle() {
 int ExecutionQueueBase::join(uint64_t id) {
     const slot_id_t slot = slot_of_id(id);
     ExecutionQueueBase* const m = butil::address_resource(slot);
-    if (m == NULL) {
+    if (m == nullptr) {
         // The queue is not created yet, this join is definitely wrong.
         return EINVAL;
     }
     int expected = _version_of_id(id);
     // acquire fence makes this thread see changes before changing _join_butex.
     while (expected == m->_join_butex->load(butil::memory_order_acquire)) {
-        if (butex_wait(m->_join_butex, expected, NULL) < 0 &&
+        if (butex_wait(m->_join_butex, expected, nullptr) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
         }
+    }
+    // Join pthread if it's started.
+    if (m->_options.use_pthread && m->_pthread_started) {
+        pthread_join(m->_pid, nullptr);
     }
     return 0;
 }
@@ -237,7 +285,7 @@ int ExecutionQueueBase::stop() {
         if (_version_of_vref(vref) != id_ver) {
             return EINVAL;
         }
-        // Try to set version=id_ver+1 (to make later address() return NULL),
+        // Try to set version=id_ver+1 (to make later address() return nullptr),
         // retry on fail.
         if (_versioned_ref.compare_exchange_strong(
                     vref, _make_vref(id_ver + 1, _ref_of_vref(vref)),
@@ -256,11 +304,11 @@ int ExecutionQueueBase::stop() {
 }
 
 int ExecutionQueueBase::_execute(TaskNode* head, bool high_priority, int* niterated) {
-    if (head != NULL && head->stop_task) {
-        CHECK(head->next == NULL);
+    if (head != nullptr && head->stop_task) {
+        CHECK(head->next.load(butil::memory_order_relaxed) == nullptr);
         head->iterated = true;
-        head->status = EXECUTED;
-        TaskIteratorBase iter(NULL, this, true, false);
+        head->status = TaskNode::EXECUTED;
+        TaskIteratorBase iter(nullptr, this, true, false);
         _execute_func(_meta, _type_specific_function, iter);
         if (niterated) {
             *niterated = 1;
@@ -292,7 +340,7 @@ ExecutionQueueBase::scoped_ptr_t ExecutionQueueBase::address(uint64_t id) {
     scoped_ptr_t ret;
     const slot_id_t slot = slot_of_id(id);
     ExecutionQueueBase* const m = butil::address_resource(slot);
-    if (BAIDU_LIKELY(m != NULL)) {
+    if (BAIDU_LIKELY(m != nullptr)) {
         // acquire fence makes sure this thread sees latest changes before
         // _dereference()
         const uint64_t vref1 = m->_versioned_ref.fetch_add(
@@ -300,14 +348,14 @@ ExecutionQueueBase::scoped_ptr_t ExecutionQueueBase::address(uint64_t id) {
         const uint32_t ver1 = _version_of_vref(vref1);
         if (ver1 == _version_of_id(id)) {
             ret.reset(m);
-            return ret.Pass();
+            return ret;
         }
 
         const uint64_t vref2 = m->_versioned_ref.fetch_sub(
             1, butil::memory_order_release);
         const int32_t nref = _ref_of_vref(vref2);
         if (nref > 1) {
-            return ret.Pass();
+            return ret;
         } else if (__builtin_expect(nref == 1, 1)) {
             const uint32_t ver2 = _version_of_vref(vref2);
             if ((ver2 & 1)) {
@@ -321,7 +369,7 @@ ExecutionQueueBase::scoped_ptr_t ExecutionQueueBase::address(uint64_t id) {
                         // We don't return m immediatly when the reference count
                         // reaches 0 as there might be in processing tasks. Instead
                         // _on_recycle would push a `stop_task', after which
-                        // is excuted m would be finally reset and returned
+                        // is executed m would be finally reset and returned
                     }
                 } else {
                     CHECK(false) << "ref-version=" << ver1
@@ -335,28 +383,28 @@ ExecutionQueueBase::scoped_ptr_t ExecutionQueueBase::address(uint64_t id) {
             CHECK(false) << "Over dereferenced id=" << id;
         }
     }
-    return ret.Pass();
+    return ret;
 }
 
 int ExecutionQueueBase::create(uint64_t* id, const ExecutionQueueOptions* options,
                                execute_func_t execute_func,
                                clear_task_mem clear_func,
                                void* meta, void* type_specific_function) {
-    if (execute_func == NULL || clear_func == NULL) {
+    if (execute_func == nullptr || clear_func == nullptr) {
         return EINVAL;
     }
 
     slot_id_t slot;
     ExecutionQueueBase* const m = butil::get_resource(&slot, Forbidden());
-    if (BAIDU_LIKELY(m != NULL)) {
+    if (BAIDU_LIKELY(m != nullptr)) {
         m->_execute_func = execute_func;
         m->_clear_func = clear_func;
         m->_meta = meta;
         m->_type_specific_function = type_specific_function;
-        CHECK(m->_head.load(butil::memory_order_relaxed) == NULL);
+        CHECK(m->_head.load(butil::memory_order_relaxed) == nullptr);
         CHECK_EQ(0, m->_high_priority_tasks.load(butil::memory_order_relaxed));
         ExecutionQueueOptions opt;
-        if (options != NULL) {
+        if (options != nullptr) {
             opt = *options;   
         }
         m->_options = opt;
@@ -365,6 +413,8 @@ int ExecutionQueueBase::create(uint64_t* id, const ExecutionQueueOptions* option
                 _version_of_vref(m->_versioned_ref.fetch_add(
                                     1, butil::memory_order_release)), slot);
         *id = m->_this_id;
+        m->_pthread_started = false;
+        m->_current_head = nullptr;
         get_execq_vars()->execq_count << 1;
         return 0;
     }
@@ -385,7 +435,7 @@ void TaskIteratorBase::operator++() {
         return;
     }
     if (_cur_node->iterated) {
-        _cur_node = _cur_node->next;
+        _cur_node = _cur_node->next.load(butil::memory_order_relaxed);
     }
     if (should_break_for_high_priority_tasks()) {
         return;
@@ -401,7 +451,7 @@ void TaskIteratorBase::operator++() {
             _num_iterated += !_cur_node->iterated;
             _cur_node->iterated = true;
         }
-        _cur_node = _cur_node->next;
+        _cur_node = _cur_node->next.load(butil::memory_order_relaxed);
     }
     return;
 }
@@ -417,9 +467,9 @@ TaskIteratorBase::~TaskIteratorBase() {
         if (_head->iterated && _head->high_priority == _high_priority) {
             _head->set_executed();
         }
-        _head = _head->next;
+        _head = _head->next.load(butil::memory_order_relaxed);
     }
-    if (_should_break && _cur_node != NULL 
+    if (_should_break && _cur_node != nullptr 
             && _cur_node->high_priority == _high_priority && _cur_node->iterated) {
         _cur_node->set_executed();
     }

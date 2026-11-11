@@ -56,7 +56,7 @@ inline bool operator==(const NSKey& k1, const NSKey& k2) {
 
 typedef butil::FlatMap<NSKey, NamingServiceThread*, NSKeyHasher> NamingServiceMap;
 // Construct on demand to make the code work before main()
-static NamingServiceMap* g_nsthread_map = NULL;
+static NamingServiceMap* g_nsthread_map = nullptr;
 static pthread_mutex_t g_nsthread_map_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 NamingServiceThread::Actions::Actions(NamingServiceThread* owner)
@@ -64,7 +64,7 @@ NamingServiceThread::Actions::Actions(NamingServiceThread* owner)
     , _wait_id(INVALID_BTHREAD_ID)
     , _has_wait_error(false)
     , _wait_error(0) {
-    CHECK_EQ(0, bthread_id_create(&_wait_id, NULL, NULL));
+    CHECK_EQ(0, bthread_id_create(&_wait_id, nullptr, nullptr));
 }
 
 NamingServiceThread::Actions::~Actions() {
@@ -80,13 +80,13 @@ NamingServiceThread::Actions::~Actions() {
 void NamingServiceThread::Actions::AddServers(
     const std::vector<ServerNode>&) {
     // FIXME(gejun)
-    abort();
+    RELEASE_ASSERT_VERBOSE(false, "Not implemented");
 }
 
 void NamingServiceThread::Actions::RemoveServers(
     const std::vector<ServerNode>&) {
     // FIXME(gejun)
-    abort();
+    RELEASE_ASSERT_VERBOSE(false, "Not implemented");
 }
 
 void NamingServiceThread::Actions::ResetServers(
@@ -125,7 +125,8 @@ void NamingServiceThread::Actions::ResetServers(
         //       Socket. SocketMapKey may be passed through AddWatcher. Make sure
         //       to pick those Sockets with the right settings during OnAddedServers
         const SocketMapKey key(_added[i], _owner->_options.channel_signature);
-        CHECK_EQ(0, SocketMapInsert(key, &tagged_id.id, _owner->_options.ssl_ctx));
+        CHECK_EQ(0, SocketMapInsert(key, &tagged_id.id,
+                                    _owner->_options.socket_option));
         _added_sockets.push_back(tagged_id);
     }
 
@@ -160,7 +161,7 @@ void NamingServiceThread::Actions::ResetServers(
                            _sockets.end());
     }
     std::vector<ServerId> removed_ids;
-    ServerNodeWithId2ServerId(_removed_sockets, &removed_ids, NULL);
+    ServerNodeWithId2ServerId(_removed_sockets, &removed_ids, nullptr);
 
     {
         BAIDU_SCOPED_LOCK(_owner->_mutex);
@@ -206,7 +207,7 @@ void NamingServiceThread::Actions::ResetServers(
 }
 
 void NamingServiceThread::Actions::EndWait(int error_code) {
-    if (bthread_id_trylock(_wait_id, NULL) == 0) {
+    if (bthread_id_trylock(_wait_id, nullptr) == 0) {
         _wait_error = error_code;
         _has_wait_error.store(true, butil::memory_order_release);
         bthread_id_unlock_and_destroy(_wait_id);
@@ -224,7 +225,7 @@ int NamingServiceThread::Actions::WaitForFirstBatchOfServers() {
 
 NamingServiceThread::NamingServiceThread()
     : _tid(0)
-    , _ns(NULL)
+    , _ns(nullptr)
     , _actions(this) {
 }
 
@@ -234,22 +235,22 @@ NamingServiceThread::~NamingServiceThread() {
     if (!_protocol.empty()) {
         const NSKey key(_protocol, _service_name, _options.channel_signature);
         std::unique_lock<pthread_mutex_t> mu(g_nsthread_map_mutex);
-        if (g_nsthread_map != NULL) {
+        if (g_nsthread_map != nullptr) {
             NamingServiceThread** ptr = g_nsthread_map->seek(key);
-            if (ptr != NULL && *ptr == this) {
+            if (ptr != nullptr && *ptr == this) {
                 g_nsthread_map->erase(key);
             }
         }
     }
     if (_tid) {
         bthread_stop(_tid);
-        bthread_join(_tid, NULL);
+        bthread_join(_tid, nullptr);
         _tid = 0;
     }
     {
         BAIDU_SCOPED_LOCK(_mutex);
         std::vector<ServerId> to_be_removed;
-        ServerNodeWithId2ServerId(_last_sockets, &to_be_removed, NULL);
+        ServerNodeWithId2ServerId(_last_sockets, &to_be_removed, nullptr);
         if (!_last_sockets.empty()) {
             for (std::map<NamingServiceWatcher*,
                           const NamingServiceFilter*>::iterator
@@ -262,20 +263,20 @@ NamingServiceThread::~NamingServiceThread() {
 
     if (_ns) {
         _ns->Destroy();
-        _ns = NULL;
+        _ns = nullptr;
     }
 }
 
 void* NamingServiceThread::RunThis(void* arg) {
     static_cast<NamingServiceThread*>(arg)->Run();
-    return NULL;
+    return nullptr;
 }
 
 int NamingServiceThread::Start(NamingService* naming_service,
                                const std::string& protocol,
                                const std::string& service_name,
                                const GetNamingServiceThreadOptions* opt_in) {
-    if (naming_service == NULL) {
+    if (naming_service == nullptr) {
         LOG(ERROR) << "Param[naming_service] is NULL";
         return -1;
     }
@@ -289,10 +290,10 @@ int NamingServiceThread::Start(NamingService* naming_service,
     if (_ns->RunNamingServiceReturnsQuickly()) {
         RunThis(this);
     } else {
-        int rc = bthread_start_urgent(&_tid, NULL, RunThis, this);
+        int rc = bthread_start_urgent(&_tid, nullptr, RunThis, this);
         if (rc) {
             LOG(ERROR) << "Fail to create bthread: " << berror(rc);
-            return -1;
+            return rc;
         }
     }
     return WaitForFirstBatchOfServers();
@@ -314,6 +315,10 @@ int NamingServiceThread::WaitForFirstBatchOfServers() {
     return 0;
 }
 
+void NamingServiceThread::EndWait(int error_code) {
+    _actions.EndWait(error_code);
+}
+
 void NamingServiceThread::ServerNodeWithId2ServerId(
     const std::vector<ServerNodeWithId>& src,
     std::vector<ServerId>* dst, const NamingServiceFilter* filter) {
@@ -332,7 +337,7 @@ void NamingServiceThread::ServerNodeWithId2ServerId(
 
 int NamingServiceThread::AddWatcher(NamingServiceWatcher* watcher,
                                     const NamingServiceFilter* filter) {
-    if (watcher == NULL) {
+    if (watcher == nullptr) {
         LOG(ERROR) << "Param[watcher] is NULL";
         return -1;
     }
@@ -349,7 +354,7 @@ int NamingServiceThread::AddWatcher(NamingServiceWatcher* watcher,
 }
     
 int NamingServiceThread::RemoveWatcher(NamingServiceWatcher* watcher) {
-    if (watcher == NULL) {
+    if (watcher == nullptr) {
         LOG(ERROR) << "Param[watcher] is NULL";
         return -1;
     }
@@ -386,14 +391,14 @@ static const char* ParseNamingServiceUrl(const char* url, char* protocol) {
     // Accepting "[^:]{1,MAX_PROTOCOL_LEN}://*.*"
     //            ^^^^^^^^^^^^^^^^^^^^^^^^   ^^^
     //            protocol                service_name
-    if (__builtin_expect(url != NULL, 1)) {
+    if (__builtin_expect(url != nullptr, 1)) {
         const char* p1 = url;
         while (*p1 != ':') {
             if (p1 < url + MAX_PROTOCOL_LEN && *p1) {
                 protocol[p1 - url] = *p1;
                 ++p1;
             } else {
-                return NULL;
+                return nullptr;
             }
         }
         if (p1 <= url + MAX_PROTOCOL_LEN) {
@@ -404,7 +409,7 @@ static const char* ParseNamingServiceUrl(const char* url, char* protocol) {
             }
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 int GetNamingServiceThread(
@@ -413,12 +418,12 @@ int GetNamingServiceThread(
     const GetNamingServiceThreadOptions* options) {
     char protocol[MAX_PROTOCOL_LEN + 1];
     const char* const service_name = ParseNamingServiceUrl(url, protocol);
-    if (service_name == NULL) {
+    if (service_name == nullptr) {
         LOG(ERROR) << "Invalid naming service url=" << url;
         return -1;
     }
     const NamingService* source_ns = NamingServiceExtension()->Find(protocol);
-    if (source_ns == NULL) {
+    if (source_ns == nullptr) {
         LOG(ERROR) << "Unknown protocol=" << protocol;
         return -1;
     }
@@ -428,48 +433,39 @@ int GetNamingServiceThread(
     butil::intrusive_ptr<NamingServiceThread> nsthread;
     {
         std::unique_lock<pthread_mutex_t> mu(g_nsthread_map_mutex);
-        if (g_nsthread_map == NULL) {
-            g_nsthread_map = new (std::nothrow) NamingServiceMap;
-            if (NULL == g_nsthread_map) {
-                mu.unlock();
-                LOG(ERROR) << "Fail to new g_nsthread_map";
-                return -1;
-            }
+        if (g_nsthread_map == nullptr) {
+            g_nsthread_map = new NamingServiceMap;
             if (g_nsthread_map->init(64) != 0) {
-                mu.unlock();
-                LOG(ERROR) << "Fail to init g_nsthread_map";
-                return -1;
+                LOG(WARNING) << "Fail to init g_nsthread_map";
             }
         }
         NamingServiceThread*& ptr = (*g_nsthread_map)[key];
-        if (ptr != NULL) {
+        if (ptr != nullptr) {
             if (ptr->AddRefManually() == 0) {
                 // The ns thread's last intrusive_ptr was just destructed and
-                // the removal-from-global-map-code in ptr->~NamingServideThread()
+                // the removal-from-global-map-code in ptr->~NamingServiceThread()
                 // is about to run or already running, need to create another ns
                 // thread.
                 // Notice that we don't need to remove the reference because
                 // the object is already destructing.
-                ptr = NULL;
+                ptr = nullptr;
             } else {
                 nsthread.reset(ptr, false);
             }
         }
-        if (ptr == NULL) {
-            NamingServiceThread* thr = new (std::nothrow) NamingServiceThread;
-            if (thr == NULL) {
-                mu.unlock();
-                LOG(ERROR) << "Fail to new NamingServiceThread";
-                return -1;
-            }
+        if (ptr == nullptr) {
+            NamingServiceThread* thr = new NamingServiceThread;
             ptr = thr;
             nsthread.reset(ptr);
             new_thread = true;
         }
     }
     if (new_thread) {
-        if (nsthread->Start(source_ns->New(), key.protocol, key.service_name, options) != 0) {
+        int rc = nsthread->Start(source_ns->New(), key.protocol, key.service_name, options);
+        if (rc != 0) {
             LOG(ERROR) << "Fail to start NamingServiceThread";
+            // Wake up those waiting for first batch of servers.
+            nsthread->EndWait(rc);
             std::unique_lock<pthread_mutex_t> mu(g_nsthread_map_mutex);
             g_nsthread_map->erase(key);
             return -1;
@@ -485,7 +481,7 @@ int GetNamingServiceThread(
 
 void NamingServiceThread::Describe(std::ostream& os,
                                    const DescribeOptions& options) const {
-    if (_ns == NULL) {
+    if (_ns == nullptr) {
         os << "null";
     } else {
         _ns->Describe(os, options);

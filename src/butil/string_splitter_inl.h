@@ -37,7 +37,7 @@ StringSplitter::StringSplitter(const char* str_begin,
 
 StringSplitter::StringSplitter(const char* str, char sep,
                                EmptyFieldAction action)
-    : StringSplitter(str, NULL, sep, action) {}
+    : StringSplitter(str, nullptr, sep, action) {}
 
 StringSplitter::StringSplitter(const StringPiece& input, char sep,
                                EmptyFieldAction action)
@@ -45,26 +45,26 @@ StringSplitter::StringSplitter(const StringPiece& input, char sep,
 
 void StringSplitter::init() {
     // Find the starting _head and _tail.
-    if (__builtin_expect(_head != NULL, 1)) {
+    if (__builtin_expect(_head != nullptr, 1)) {
         if (_empty_field_action == SKIP_EMPTY_FIELD) {
-            for (; _sep == *_head && not_end(_head); ++_head) {}
+            for (; not_end(_head) && *_head == _sep; ++_head) {}
         }
-        for (_tail = _head; *_tail != _sep && not_end(_tail); ++_tail) {}
+        for (_tail = _head; not_end(_tail) && *_tail != _sep; ++_tail) {}
     } else {
-        _tail = NULL;
+        _tail = nullptr;
     }
 }
 
 StringSplitter& StringSplitter::operator++() {
-    if (__builtin_expect(_tail != NULL, 1)) {
+    if (__builtin_expect(_tail != nullptr, 1)) {
         if (not_end(_tail)) {
             ++_tail;
             if (_empty_field_action == SKIP_EMPTY_FIELD) {
-                for (; _sep == *_tail && not_end(_tail); ++_tail) {}
+                for (; not_end(_tail) && *_tail == _sep; ++_tail) {}
             }
         }
         _head = _tail;
-        for (; *_tail != _sep && not_end(_tail); ++_tail) {}
+        for (; not_end(_tail) && *_tail != _sep; ++_tail) {}
     }
     return *this;
 }
@@ -76,7 +76,7 @@ StringSplitter StringSplitter::operator++(int) {
 }
 
 StringSplitter::operator const void*() const {
-    return (_head != NULL && not_end(_head)) ? _head : NULL;
+    return (_head != nullptr && not_end(_head)) ? _head : nullptr;
 }
 
 const char* StringSplitter::field() const {
@@ -92,7 +92,7 @@ StringPiece StringSplitter::field_sp() const {
 }
 
 bool StringSplitter::not_end(const char* p) const {
-    return (_str_tail == NULL) ? *p : (p != _str_tail);
+    return (_str_tail == nullptr) ? *p : (p != _str_tail);
 }
 
 int StringSplitter::to_int8(int8_t* pv) const {
@@ -132,45 +132,51 @@ int StringSplitter::to_uint(unsigned int* pv) const {
 }
 
 int StringSplitter::to_long(long* pv) const {
-    char* endptr = NULL;
-    *pv = strtol(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtol(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringSplitter::to_ulong(unsigned long* pv) const {
-    char* endptr = NULL;
-    *pv = strtoul(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtoul(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringSplitter::to_longlong(long long* pv) const {
-    char* endptr = NULL;
-    *pv = strtoll(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtoll(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringSplitter::to_ulonglong(unsigned long long* pv) const {
-    char* endptr = NULL;
-    *pv = strtoull(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtoull(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringSplitter::to_float(float* pv) const {
-    char* endptr = NULL;
-    *pv = strtof(field(), &endptr);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtof(value.c_str(), &endptr);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringSplitter::to_double(double* pv) const {
-    char* endptr = NULL;
-    *pv = strtod(field(), &endptr);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtod(value.c_str(), &endptr);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 StringMultiSplitter::StringMultiSplitter (
     const char* str, const char* seps, EmptyFieldAction action)
     : _head(str)
-    , _str_tail(NULL)
+    , _str_tail(nullptr)
     , _seps(seps)
     , _empty_field_action(action) {
     init();
@@ -187,26 +193,26 @@ StringMultiSplitter::StringMultiSplitter (
 }
 
 void StringMultiSplitter::init() {
-    if (__builtin_expect(_head != NULL, 1)) {
+    if (__builtin_expect(_head != nullptr, 1)) {
         if (_empty_field_action == SKIP_EMPTY_FIELD) {
-            for (; is_sep(*_head) && not_end(_head); ++_head) {}
+            for (; not_end(_head) && is_sep(*_head); ++_head) {}
         }
-        for (_tail = _head; !is_sep(*_tail) && not_end(_tail); ++_tail) {}
+        for (_tail = _head; not_end(_tail) && !is_sep(*_tail); ++_tail) {}
     } else {
-        _tail = NULL;
+        _tail = nullptr;
     }
 }
 
 StringMultiSplitter& StringMultiSplitter::operator++() {
-    if (__builtin_expect(_tail != NULL, 1)) {
+    if (__builtin_expect(_tail != nullptr, 1)) {
         if (not_end(_tail)) {
             ++_tail;
             if (_empty_field_action == SKIP_EMPTY_FIELD) {
-                for (; is_sep(*_tail) && not_end(_tail); ++_tail) {}
+                for (; not_end(_tail) && is_sep(*_tail); ++_tail) {}
             }
         }
         _head = _tail;
-        for (; !is_sep(*_tail) && not_end(_tail); ++_tail) {}
+        for (; not_end(_tail) && !is_sep(*_tail); ++_tail) {}
     }
     return *this;
 }
@@ -227,7 +233,7 @@ bool StringMultiSplitter::is_sep(char c) const {
 }
 
 StringMultiSplitter::operator const void*() const {
-    return (_head != NULL && not_end(_head)) ? _head : NULL;
+    return (_head != nullptr && not_end(_head)) ? _head : nullptr;
 }
 
 const char* StringMultiSplitter::field() const {
@@ -243,7 +249,7 @@ StringPiece StringMultiSplitter::field_sp() const {
 }
 
 bool StringMultiSplitter::not_end(const char* p) const {
-    return (_str_tail == NULL) ? *p : (p != _str_tail);
+    return (_str_tail == nullptr) ? *p : (p != _str_tail);
 }
 
 int StringMultiSplitter::to_int8(int8_t* pv) const {
@@ -283,39 +289,45 @@ int StringMultiSplitter::to_uint(unsigned int* pv) const {
 }
 
 int StringMultiSplitter::to_long(long* pv) const {
-    char* endptr = NULL;
-    *pv = strtol(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtol(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringMultiSplitter::to_ulong(unsigned long* pv) const {
-    char* endptr = NULL;
-    *pv = strtoul(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtoul(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringMultiSplitter::to_longlong(long long* pv) const {
-    char* endptr = NULL;
-    *pv = strtoll(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtoll(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringMultiSplitter::to_ulonglong(unsigned long long* pv) const {
-    char* endptr = NULL;
-    *pv = strtoull(field(), &endptr, 10);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtoull(value.c_str(), &endptr, 10);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringMultiSplitter::to_float(float* pv) const {
-    char* endptr = NULL;
-    *pv = strtof(field(), &endptr);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtof(value.c_str(), &endptr);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 int StringMultiSplitter::to_double(double* pv) const {
-    char* endptr = NULL;
-    *pv = strtod(field(), &endptr);
-    return (endptr == field() + length()) ? 0 : -1;
+    const std::string value(field(), length());
+    char* endptr = nullptr;
+    *pv = strtod(value.c_str(), &endptr);
+    return (endptr == value.c_str() + value.size()) ? 0 : -1;
 }
 
 void KeyValuePairsSplitter::UpdateDelimiterPosition() {

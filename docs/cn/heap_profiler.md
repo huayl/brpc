@@ -37,7 +37,7 @@ WARNING: 12-26 10:01:25:   * 0 [src/brpc/input_messenger.cpp:132][4294969345] Au
 
 ![img](../images/heap_profiler_1.png)
 
-左上角是当前程序通过malloc分配的内存总量，顺着箭头上的数字可以看到内存来自哪些函数。
+左上角是当前程序通过malloc分配的内存总量，顺着箭头上的数字可以看到内存来自哪些函数。方框内第一个百分比是本函数的内存占用比例, 第二个百分比是本函数及其子函数的内存占用比例
 
 点击左上角的text选择框可以查看文本格式的结果，有时候这种按分配量排序的形式更方便。
 
@@ -45,7 +45,7 @@ WARNING: 12-26 10:01:25:   * 0 [src/brpc/input_messenger.cpp:132][4294969345] Au
 
 左上角的两个选择框作用分别是：
 
-- View：当前正在看的profile。选择\<new profile\>表示新建一个。新建完毕后，View选择框中会出现新profile，URL也会被修改为对应的地址。这意味着你可以通过粘贴URL分享结果，点击链接的人将看到和你一模一样的结果，而不是重做profiling的结果。你可以在框中选择之前的profile查看。历史profiie保留最近的32个，可通过[--max_profiles_kept](http://brpc.baidu.com:8765/flags/max_profiles_kept)调整。
+- View：当前正在看的profile。选择\<new profile\>表示新建一个。新建完毕后，View选择框中会出现新profile，URL也会被修改为对应的地址。这意味着你可以通过粘贴URL分享结果，点击链接的人将看到和你一模一样的结果，而不是重做profiling的结果。你可以在框中选择之前的profile查看。历史profiie保留最近的32个，可通过[--max_profiles_kept](http://localhost:8765/flags/max_profiles_kept)调整。
 - Diff：和选择的profile做对比。<none>表示什么都不选。如果你选择了之前的某个profile，那么将看到View框中的profile相比Diff框中profile的变化量。
 
 下图演示了勾选Diff和Text的效果。
@@ -107,3 +107,63 @@ brpc还提供一个类似的growth profiler分析内存的分配去向（不考�
 
 1. 安装[standalone pprof](https://github.com/google/pprof)，并把下载的pprof二进制文件路径写入环境变量GOOGLE_PPROF_BINARY_PATH中
 2. 安装llvm-symbolizer（将函数符号转化为函数名），直接用brew安装即可：`brew install llvm`
+
+# Jemalloc Heap Profiler
+
+## 开启方法
+
+1. 编译[jemalloc](https://github.com/jemalloc/jemalloc)时需--enable-prof以支持profiler, 安装完成后bin目录下会有jeprof文件。
+2. 启动进程前最好配置env `JEPROF_FILE=/xxx/jeprof`，否则进程默认用$PATH里的jeprof解析。
+3. 进程开启profiler：
+  - 启动进程并开启profiler功能：`MALLOC_CONF="prof:true" LD_PRELOAD=/xxx/lib/libjemalloc.so ./bin/test_server`，MALLOC_CONF是env项，prof:true只做一些初始化动作，并不会采样，但[prof_active](https://jemalloc.net/jemalloc.3.html#opt.prof_active)默认是true，所以进程启动就会采样。
+  - 若静态链接jemalloc：`MALLOC_CONF="prof:true" ./bin/test_server`。
+  - 或通过下面的gflags控制，gflags不会反应MALLOC_CONF值。
+4. 相关gflags说明：
+  - FLAGS_je_prof_active：true:开启采样，false:关闭采样。
+  - FLAGS_je_prof_dump：修改值会生成heap文件，用于手动操作jeprof分析。
+  - FLAGS_je_prof_reset：清理已采样数据，并且动态设置采样率，[默认](https://jemalloc.net/jemalloc.3.html#opt.lg_prof_sample)2^19B（512K），对性能影响可忽略。
+5. 若要做memory leak:
+  - `MALLOC_CONF="prof:true,prof_leak:true,prof_final:true" LD_PRELOAD=/xxx/lib/libjemalloc.so ./bin/test_server` ，进程退出时生成heap文件。
+  - 注：可`kill pid`优雅退出，不可`kill -9 pid`；可用`FLAGS_graceful_quit_on_sigterm=true FLAGS_graceful_quit_on_sighup=true`来支持优雅退出。
+
+注：
+  - 每次dump的都是从采样至今的所有数据，若触发了reset，接来下dump的是从reset至今的所有数据，方便做diff。
+  - 更多jemalloc profiler选项请参考[官网](https://jemalloc.net/jemalloc.3.html)，如`prof_leak_error:true`则检测到内存泄漏，进程立即退出。
+
+## 样例
+
+- jeprof命令`jeprof ip:port/pprof/heap`。
+
+![img](../images/cmd_jeprof_text.png)
+
+- curl生成text格式`curl ip:port/pprof/heap?display=text`。
+
+![img](../images/curl_jeprof_text.png)
+
+- curl生成svg图片格式`curl ip:port/pprof/heap?display=svg`。
+
+![img](../images/curl_jeprof_svg.png)
+
+- 分配对象个数`curl ip:port/pprof/heap?display=svg&extra_options=inuse_objects`。
+
+- curl生成火焰图`curl ip:port/pprof/heap?display=flamegraph`。需配置env FLAMEGRAPH_PL_PATH=/xxx/flamegraph.pl，[flamegraph](https://github.com/brendangregg/FlameGraph)
+
+![img](../images/curl_jeprof_flamegraph.png)
+
+- curl获取内存统计信息`curl ip:port/pprof/heap?display=stats&opts=Ja`或`curl ip:port/memory?opts=Ja`，更多opts请参考[opts](https://github.com/jemalloc/jemalloc/blob/dev/include/jemalloc/internal/stats.h#L9)。
+
+![img](../images/je_stats_print.png)
+
+ - 内存使用量可关注:
+   1. jemalloc.stats下的
+     - [resident](https://jemalloc.net/jemalloc.3.html#stats.resident)
+     - [metadata](https://jemalloc.net/jemalloc.3.html#stats.metadata)
+     - [allocated](https://jemalloc.net/jemalloc.3.html#stats.allocated)：jeprof分析的就是这部分内存。
+     - [active](https://jemalloc.net/jemalloc.3.html#stats.active)：active - allocated ≈ unuse。
+   2. stats.arenas下的：
+     - [resident](https://jemalloc.net/jemalloc.3.html#stats.arenas.i.resident)
+     - [pactive](https://jemalloc.net/jemalloc.3.html#stats.arenas.i.pactive)
+     - [base](https://jemalloc.net/jemalloc.3.html#stats.arenas.i.base)：含义近似metadata
+     - [small.allocated](https://jemalloc.net/jemalloc.3.html#stats.arenas.i.small.allocated)
+     - [large.allocated](https://jemalloc.net/jemalloc.3.html#stats.arenas.i.large.allocated)：arena allocated ≈ small.allocated + large.allocated
+

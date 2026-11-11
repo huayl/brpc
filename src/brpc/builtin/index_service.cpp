@@ -54,15 +54,15 @@ void IndexService::default_method(::google::protobuf::RpcController* controller,
         google::protobuf::Service* svc = server->FindServiceByFullName(
             StatusService::descriptor()->full_name());
         StatusService* st_svc = dynamic_cast<StatusService*>(svc);
-        if (st_svc == NULL) {
+        if (st_svc == nullptr) {
             cntl->SetFailed("Fail to find StatusService");
             return;
         }
-        return st_svc->default_method(cntl, NULL, NULL, done_guard.release());
+        return st_svc->default_method(cntl, nullptr, nullptr, done_guard.release());
     }
     cntl->http_response().set_content_type(
         use_html ? "text/html" : "text/plain");
-    const butil::EndPoint* const html_addr = (use_html ? Path::LOCAL : NULL);
+    const butil::EndPoint* const html_addr = (use_html ? Path::LOCAL : nullptr);
     const char* const NL = (use_html ? "<br>\n" : "\n");
     const char* const SP = (use_html ? "&nbsp;" : "  ");
 
@@ -87,9 +87,9 @@ void IndexService::default_method(::google::protobuf::RpcController* controller,
     }
     os << '\n';
     if (use_html) {
-        os << "<a href=\"https://github.com/brpc/brpc\">github</a>";
+        os << "<a href=\"https://github.com/apache/brpc\">github</a>";
     } else {
-        os << "github : https://github.com/brpc/brpc";
+        os << "github : https://github.com/apache/brpc";
     }
     os << NL << NL;
     if (!as_more) {
@@ -140,7 +140,9 @@ void IndexService::default_method(::google::protobuf::RpcController* controller,
            << (!IsHeapProfilerEnabled() ? " (disabled)" : "") << NL
            << Path("/hotspots/growth", html_addr)
            << " : Profiling growth of heap"
-           << (!IsHeapProfilerEnabled() ? " (disabled)" : "") << NL;
+           << (!IsHeapProfilerEnabled() ? " (disabled)" : "") << NL
+           << Path("/hotspots/contention", html_addr)
+           << " : Profiling contention of lock" << NL;
     }
     os << "curl -H 'Content-Type: application/json' -d 'JSON' ";
     if (butil::is_endpoint_extended(server->listen_address())) {
@@ -156,14 +158,15 @@ void IndexService::default_method(::google::protobuf::RpcController* controller,
        << Path("/health", html_addr) << " : Test healthy" << NL
        << Path("/vlog", html_addr) << " : List all VLOG callsites" << NL
        << Path("/sockets", html_addr) << " : Check status of a Socket" << NL
-       << Path("/bthreads", html_addr) << " : Check status of a bthread" << NL
+       << Path("/bthreads", html_addr) << " : Check status of a bthread or all living bthreads" << NL
        << Path("/ids", html_addr) << " : Check status of a bthread_id" << NL
        << Path("/protobufs", html_addr) << " : List all protobuf services and messages" << NL
        << Path("/list", html_addr) << " : json signature of methods" << NL
        << Path("/threads", html_addr) << " : Check pstack"
        << (!FLAGS_enable_threads_service ? " (disabled)" : "") << NL
        << Path("/dir", html_addr) << " : Browse directories and files"
-       << (!FLAGS_enable_dir_service ? " (disabled)" : "") << NL;
+       << (!FLAGS_enable_dir_service ? " (disabled)" : "") << NL
+       << Path("/memory", html_addr) << " : Get malloc allocator information" << NL;
     if (use_html) {
         os << "</body></html>";
     }

@@ -15,29 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: Fri Dec  5 13:40:57 CST 2014
 
 #ifndef BTHREAD_PROCESSOR_H
 #define BTHREAD_PROCESSOR_H
 
-#include "butil/build_config.h"
-
-// Pause instruction to prevent excess processor bus usage, only works in GCC
-# ifndef cpu_relax
-#if defined(ARCH_CPU_ARM_FAMILY)
-# define cpu_relax() asm volatile("yield\n": : :"memory")
-#else
-# define cpu_relax() asm volatile("pause\n": : :"memory")
-#endif
-# endif
-
-// Compile read-write barrier
-# ifndef barrier
-# define barrier() asm volatile("": : :"memory")
-# endif
-
+#include "butil/processor.h"
 
 # define BT_LOOP_WHEN(expr, num_spins)                                  \
     do {                                                                \

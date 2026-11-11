@@ -108,6 +108,15 @@ public:
     void Encode(butil::IOBufAppender* out, const Header& header)
     { return Encode(out, header, HPackOptions()); }
 
+    // Encode header without consulting or mutating the dynamic table (uses
+    // static-table indexed representation when matched, or literal representation
+    // per RFC 7541 section 6.1 / 6.2.2 / 6.2.3). Safe to use for trailers whose
+    // transmission may be deferred behind flow-controlled DATA frames while
+    // other streams continue to encode HEADERS on the same connection.
+    static void EncodeWithoutDynamicTable(butil::IOBufAppender* out,
+                                          const Header& header,
+                                          const HPackOptions& options);
+
     // Try to decode at most one Header from source and erase corresponding
     // buffer.
     // Returns:
@@ -132,6 +141,11 @@ private:
 
     IndexTable* _encode_table;
     IndexTable* _decode_table;
+    // The max dynamic table size this decoder was initialized with, i.e.
+    // the SETTINGS_HEADER_TABLE_SIZE we advertised to the peer. Per RFC
+    // 7541 section 4.2/6.3 a dynamic table size update exceeding it must
+    // be treated as a decoding error.
+    size_t _max_table_size;
 };
 
 // Lowercase the input string, a fast implementation.

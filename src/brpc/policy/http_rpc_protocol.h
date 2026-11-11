@@ -43,6 +43,8 @@ struct CommonStrings {
     std::string ACCEPT_ENCODING;
     std::string CONTENT_ENCODING;
     std::string CONTENT_LENGTH;
+    std::string EXPECT;
+    std::string CONTINUE_100;
     std::string GZIP;
     std::string CONNECTION;
     std::string KEEP_ALIVE;
@@ -75,6 +77,8 @@ struct CommonStrings {
     std::string GRPC_MESSAGE;
     std::string GRPC_TIMEOUT;
 
+    std::string DEFAULT_PATH;
+
     CommonStrings();
 };
 
@@ -83,10 +87,19 @@ class HttpContext : public ReadableProgressiveAttachment
                   , public InputMessageBase
                   , public HttpMessage {
 public:
-    HttpContext(bool read_body_progressively)
+    void SetSocketId(SocketId id) {
+        _socket_id = id;
+    }
+
+    SocketId socket_id() const { return _socket_id; }
+
+    explicit HttpContext(bool read_body_progressively,
+                         HttpMethod request_method = HTTP_METHOD_GET)
         : InputMessageBase()
-        , HttpMessage(read_body_progressively)
-        , _is_stage2(false) {
+        , HttpMessage(read_body_progressively, request_method)
+        , _is_stage2(false)
+        , _expect_handled(false)
+        , _socket_id(INVALID_SOCKET_ID) {
         // add one ref for Destroy
         butil::intrusive_ptr<HttpContext>(this).detach();
     }
@@ -103,18 +116,28 @@ public:
     // True if AddOneRefForStage2() was ever called.
     bool is_stage2() const { return _is_stage2; }
 
+    // True once ParseHttpMessage() has dealt with the `Expect' header of this
+    // request. The parser is re-entered on every read while the body is still
+    // incomplete; the expectation is answered on the first of them only.
+    bool expect_handled() const { return _expect_handled; }
+    void set_expect_handled() { _expect_handled = true; }
+
     // @InputMessageBase
-    void DestroyImpl() {
+    void DestroyImpl() override {
         RemoveOneRefForStage2();
     }
 
     // @ReadableProgressiveAttachment
-    void ReadProgressiveAttachmentBy(ProgressiveReader* r) {
+    void ReadProgressiveAttachmentBy(ProgressiveReader* r) override {
         return SetBodyReader(r);
     }
 
+    void CheckProgressiveRead(const void* arg, Socket *socket);
+
 private:
     bool _is_stage2;
+    bool _expect_handled;
+    SocketId _socket_id;
 };
 
 // Implement functions required in protocol.h
@@ -142,6 +165,7 @@ enum HttpContentType {
     HTTP_CONTENT_JSON = 1,
     HTTP_CONTENT_PROTO = 2,
     HTTP_CONTENT_PROTO_TEXT = 3,
+    HTTP_CONTENT_PROTO_JSON = 4,
 };
 
 // Parse from the textual content type. One type may have more than one literals.

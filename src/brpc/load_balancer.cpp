@@ -19,6 +19,7 @@
 #include <gflags/gflags.h>
 #include "brpc/reloadable_flags.h"
 #include "brpc/load_balancer.h"
+#include "brpc/socket.h"
 
 
 namespace brpc {
@@ -33,6 +34,15 @@ BRPC_VALIDATE_GFLAG(show_lb_in_vars, PassValidate);
 
 // For assigning unique names for lb.
 static butil::static_atomic<int> g_lb_counter = BUTIL_STATIC_ATOMIC_INIT(0);
+
+bool LoadBalancer::IsServerAvailable(SocketId id, SocketUniquePtr* out) {
+    SocketUniquePtr ptr;
+    bool res = Socket::Address(id, &ptr) == 0 && ptr->IsAvailable();
+    if (res) {
+        *out = std::move(ptr);
+    }
+    return res;
+}
 
 void SharedLoadBalancer::DescribeLB(std::ostream& os, void* arg) {
     (static_cast<SharedLoadBalancer*>(arg))->Describe(os, DescribeOptions());
@@ -55,7 +65,7 @@ void SharedLoadBalancer::ExposeLB() {
 }
 
 SharedLoadBalancer::SharedLoadBalancer()
-    : _lb(NULL)
+    : _lb(nullptr)
     , _weight_sum(0)
     , _exposed(false)
     , _st(DescribeLB, this) {
@@ -65,7 +75,7 @@ SharedLoadBalancer::~SharedLoadBalancer() {
     _st.hide();
     if (_lb) {
         _lb->Destroy();
-        _lb = NULL;
+        _lb = nullptr;
     }
 }
 
@@ -73,17 +83,17 @@ int SharedLoadBalancer::Init(const char* lb_protocol) {
     std::string lb_name;
     butil::StringPiece lb_params;
     if (!ParseParameters(lb_protocol, &lb_name, &lb_params)) {
-        LOG(FATAL) << "Fail to parse this load balancer protocol '" << lb_protocol << '\'';
+        LOG(ERROR) << "Fail to parse this load balancer protocol '" << lb_protocol << '\'';
         return -1;
     }
     const LoadBalancer* lb = LoadBalancerExtension()->Find(lb_name.c_str());
-    if (lb == NULL) {
-        LOG(FATAL) << "Fail to find LoadBalancer by `" << lb_name << "'";
+    if (lb == nullptr) {
+        LOG(ERROR) << "Fail to find LoadBalancer by `" << lb_name << "'";
         return -1;
     }
     _lb = lb->New(lb_params);
-    if (_lb == NULL) {
-        LOG(FATAL) << "Fail to new LoadBalancer";
+    if (_lb == nullptr) {
+        LOG(ERROR) << "Fail to new LoadBalancer";
         return -1;
     }
     if (FLAGS_show_lb_in_vars && !_exposed) {
@@ -94,7 +104,7 @@ int SharedLoadBalancer::Init(const char* lb_protocol) {
 
 void SharedLoadBalancer::Describe(std::ostream& os,
                                   const DescribeOptions& options) {
-    if (_lb == NULL) {
+    if (_lb == nullptr) {
         os << "lb=NULL";
     } else {
         _lb->Describe(os, options);

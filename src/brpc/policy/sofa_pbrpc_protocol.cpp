@@ -20,7 +20,10 @@
 #include <google/protobuf/message.h>             // Message
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/io/coded_stream.h>
+
 #include "butil/time.h"
+#include "butil/strings/string_util.h"
+
 #include "brpc/controller.h"                // Controller
 #include "brpc/socket.h"                    // Socket
 #include "brpc/server.h"                    // Server
@@ -186,11 +189,12 @@ ParseResult ParseSofaMessage(butil::IOBuf* source, Socket* socket,
                    << " + body_size=" << body_size;
         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
     }
-    if (body_size > FLAGS_max_body_size) {
-        // We need this log to report the body_size to give users some clues
+    if (body_size > FLAGS_max_body_size ||
+        meta_size > FLAGS_max_body_size) {
+        // We need this log to report the size to give users some clues
         // which is not printed in InputMessenger.
-        LOG(ERROR) << "body_size=" << body_size << " from "
-                   << socket->remote_side() << " is too large";
+        LOG(ERROR) << "body_size=" << body_size << " meta_size=" << meta_size
+                   << " from " << socket->remote_side() << " is too large";
         return MakeParseError(PARSE_ERROR_TOO_BIG_DATA);
     } else if (source->length() < sizeof(header_buf) + msg_size) {
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
@@ -212,7 +216,7 @@ static void SendSofaResponse(int64_t correlation_id,
                              MethodStatus* method_status,
                              int64_t received_us) {
     ControllerPrivateAccessor accessor(cntl);
-    Span* span = accessor.span();
+    auto span = accessor.span();
     if (span) {
         span->set_start_send_us(butil::cpuwide_time_us());
     }
@@ -233,11 +237,11 @@ static void SendSofaResponse(int64_t correlation_id,
 
     bool append_body = false;
     butil::IOBuf res_body;
-    // `res' can be NULL here, in which case we don't serialize it
+    // `res' can be nullptr here, in which case we don't serialize it
     // If user calls `SetFailed' on Controller, we don't serialize
     // response either
     CompressType type = cntl->response_compress_type();
-    if (res != NULL && !cntl->Failed()) {
+    if (res != nullptr && !cntl->Failed()) {
         if (!res->IsInitialized()) {
             cntl->SetFailed(
                 ERESPONSE, "Missing required fields in response: %s", 
@@ -281,8 +285,15 @@ static void SendSofaResponse(int64_t correlation_id,
     }
     // Have the risk of unlimited pending responses, in which case, tell
     // users to set max_concurrency.
+    ResponseWriteInfo args;
     Socket::WriteOptions wopt;
     wopt.ignore_eovercrowded = true;
+    bthread_id_t response_id = INVALID_BTHREAD_ID;
+    if (span) {
+        CHECK_EQ(0, bthread_id_create(&response_id, &args, HandleResponseWritten));
+        wopt.id_wait = response_id;
+        wopt.notify_on_success = true;
+    }
     if (sock->Write(&res_buf, &wopt) != 0) {
         const int errcode = errno;
         PLOG_IF(WARNING, errcode != EPIPE) << "Fail to write into " << *sock;
@@ -290,9 +301,12 @@ static void SendSofaResponse(int64_t correlation_id,
                         sock->description().c_str());
         return;
     }
+
     if (span) {
+        bthread_id_join(response_id);
+        // Do not care about the result of background writing.
         // TODO: this is not sent
-        span->set_sent_us(butil::cpuwide_time_us());
+        span->set_sent_us(args.sent_us);
     }
 }
 
@@ -331,11 +345,7 @@ void ProcessSofaRequest(InputMessageBase* msg_base) {
         sample->submit(start_parse_us);
     }
 
-    std::unique_ptr<Controller> cntl(new (std::nothrow) Controller);
-    if (NULL == cntl.get()) {
-        LOG(WARNING) << "Fail to new Controller";
-        return;
-    }
+    std::unique_ptr<Controller> cntl(new Controller);
     std::unique_ptr<google::protobuf::Message> req;
     std::unique_ptr<google::protobuf::Message> res;
 
@@ -361,7 +371,7 @@ void ProcessSofaRequest(InputMessageBase* msg_base) {
         bthread_assign_data((void*)&server->thread_local_options());
     }
 
-    Span* span = NULL;
+    std::shared_ptr<Span> span;
     if (IsTraceable(false)) {
         span = Span::CreateServerSpan(
             0/*meta.trace_id()*/, 0/*meta.span_id()*/,
@@ -374,16 +384,10 @@ void ProcessSofaRequest(InputMessageBase* msg_base) {
         span->set_request_size(msg->meta.size() + msg->payload.size() + 24);
     }
 
-    MethodStatus* method_status = NULL;
+    MethodStatus* method_status = nullptr;
     do {
         if (!server->IsRunning()) {
             cntl->SetFailed(ELOGOFF, "Server is stopping");
-            break;
-        }
-
-        if (socket->is_overcrowded()) {
-            cntl->SetFailed(EOVERCROWDED, "Connection to %s is overcrowded",
-                            butil::endpoint2str(socket->remote_side()).c_str());
             break;
         }
 
@@ -399,29 +403,45 @@ void ProcessSofaRequest(InputMessageBase* msg_base) {
             break;
         }
         
-        const Server::MethodProperty *sp =
+        const Server::MethodProperty* mp =
             server_accessor.FindMethodPropertyByFullName(meta.method());
-        if (NULL == sp) {
+        if (nullptr == mp) {
             cntl->SetFailed(ENOMETHOD, "Fail to find method=%s", 
                             meta.method().c_str());
             break;
         }
+        if (RejectBuiltinAccess(cntl.get(), *server, mp) ||
+            RejectNonBuiltinAccessFromInternalPort(cntl.get(), *server, mp)) {
+            break;
+        }
+        if (socket->is_overcrowded() &&
+            !server->options().ignore_eovercrowded &&
+            !mp->ignore_eovercrowded) {
+            cntl->SetFailed(EOVERCROWDED, "Connection to %s is overcrowded",
+                            butil::endpoint2str(socket->remote_side()).c_str());
+            break;
+        }
         // Switch to service-specific error.
         non_service_error.release();
-        method_status = sp->status;
+        method_status = mp->status;
         if (method_status) {
             int rejected_cc = 0;
             if (!method_status->OnRequested(&rejected_cc)) {
                 cntl->SetFailed(ELIMIT, "Rejected by %s's ConcurrencyLimiter, concurrency=%d",
-                                sp->method->full_name().c_str(), rejected_cc);
+                                butil::EnsureString(mp->method->full_name()).c_str(), rejected_cc);
                 break;
             }
         }
-        google::protobuf::Service* svc = sp->service;
-        const google::protobuf::MethodDescriptor* method = sp->method;
+        google::protobuf::Service* svc = mp->service;
+        const google::protobuf::MethodDescriptor* method = mp->method;
         accessor.set_method(method);
+
+        if (!server->AcceptRequest(cntl.get())) {
+            break;
+        }
+
         if (span) {
-            span->ResetServerSpanName(method->full_name());
+            span->ResetServerSpanName(butil::EnsureString(method->full_name()));
         }
         req.reset(svc->GetRequestPrototype(method).New());
         if (!ParseFromCompressedData(msg->payload, req.get(), req_cmp_type)) {
@@ -489,17 +509,25 @@ void ProcessSofaResponse(InputMessageBase* msg_base) {
     }
 
     const bthread_id_t cid = { static_cast<uint64_t>(meta.sequence_id()) };
-    Controller* cntl = NULL;
+    Controller* cntl = nullptr;
     const int rc = bthread_id_lock(cid, (void**)&cntl);
     if (rc != 0) {
         LOG_IF(ERROR, rc != EINVAL && rc != EPERM)
             << "Fail to lock correlation_id=" << cid << ": " << berror(rc);
         return;
     }
-    
+
+    if (cntl == nullptr || !ControllerPrivateAccessor(cntl)
+            .does_response_match_request_socket(cid, msg->socket()->id())) {
+        LOG(WARNING) << "correlation_id=" << cid.value
+                     << " of the response from " << *msg->socket()
+                     << " does not match a request sent over it, drop it";
+        CHECK_EQ(0, bthread_id_unlock(cid));
+        return;
+    }
+
     ControllerPrivateAccessor accessor(cntl);
-    Span* span = accessor.span();
-    if (span) {
+    if (auto span = accessor.span()) {
         span->set_base_real_us(msg->base_real_us());
         span->set_received_us(msg->received_us());
         span->set_response_size(msg->meta.size() + msg->payload.size() + 24);

@@ -36,13 +36,13 @@ TEST_F(StringSplitterTest, sanity) {
     const char* str = "hello there!   man ";
     butil::StringSplitter ss(str, ' ');
     // "hello"
-    ASSERT_TRUE(ss != NULL);
+    ASSERT_TRUE(ss != nullptr);
     ASSERT_EQ(5ul, ss.length());
     ASSERT_EQ(ss.field(), str);
 
     // "there!"
     ++ss;
-    ASSERT_NE(ss, (void*)NULL);
+    ASSERT_NE(ss, (void*)nullptr);
     ASSERT_EQ(6ul, ss.length());
     ASSERT_EQ(ss.field(), str+6);
 
@@ -246,6 +246,46 @@ TEST_F(StringSplitterTest, number_list) {
     ASSERT_EQ(ss2.field(), str + str_len);
 }
 
+template <typename Splitter>
+void CheckBoundedNumericField(const Splitter& splitter) {
+    long l;
+    unsigned long ul;
+    long long ll;
+    unsigned long long ull;
+    float f;
+    double d;
+    EXPECT_EQ(0, splitter.to_long(&l));
+    EXPECT_EQ(123, l);
+    EXPECT_EQ(0, splitter.to_ulong(&ul));
+    EXPECT_EQ(123u, ul);
+    EXPECT_EQ(0, splitter.to_longlong(&ll));
+    EXPECT_EQ(123, ll);
+    EXPECT_EQ(0, splitter.to_ulonglong(&ull));
+    EXPECT_EQ(123u, ull);
+    EXPECT_EQ(0, splitter.to_float(&f));
+    EXPECT_FLOAT_EQ(123, f);
+    EXPECT_EQ(0, splitter.to_double(&d));
+    EXPECT_DOUBLE_EQ(123, d);
+}
+
+TEST_F(StringSplitterTest, numeric_conversions_respect_field_end) {
+    // The suffix is numeric too: parsing must stop at the explicit end,
+    // rather than consume it and reject the bounded field afterwards.
+    const char text[] = "123456";
+    CheckBoundedNumericField(butil::StringSplitter(text, text + 3, ','));
+    CheckBoundedNumericField(butil::StringMultiSplitter(text, text + 3, ",;"));
+
+    // These bytes have no trailing NUL. Sanitizers also check the read bound.
+    const std::string digits = "123";
+    char* bounded = new char[digits.size()];
+    memcpy(bounded, digits.data(), digits.size());
+    CheckBoundedNumericField(butil::StringSplitter(
+        bounded, bounded + digits.size(), ','));
+    CheckBoundedNumericField(butil::StringMultiSplitter(
+        bounded, bounded + digits.size(), ",;"));
+    delete[] bounded;
+}
+
 TEST_F(StringSplitterTest, cast_type) {
     const char* str = "-1\t123\t111\t1\t10\t11\t1.3\t3.1415926\t127\t128\t256";
     int i = 0;
@@ -354,11 +394,56 @@ TEST_F(StringSplitterTest, split_limit_len) {
     ASSERT_FALSE(ss3);
 }
 
+TEST_F(StringSplitterTest, non_null_terminated_string) {
+    const char str[] = "  a non  null   terminated  string   ";
+    const size_t len = strlen(str);
+    char* buf = new char[len];
+    memcpy(buf, str, len);
+
+    butil::StringSplitter ss(buf, buf + len, ' ');
+
+    // "a"
+    ASSERT_TRUE(ss != nullptr);
+    ASSERT_EQ(1ul, ss.length());
+    ASSERT_EQ(ss.field(), buf + 2);
+
+    // "non"
+    ++ss;
+    ASSERT_TRUE(ss != nullptr);
+    ASSERT_EQ(3ul, ss.length());
+    ASSERT_EQ(ss.field(), buf + 4);
+
+    // "null"
+    ++ss;
+    ASSERT_TRUE(ss != nullptr);
+    ASSERT_EQ(4ul, ss.length());
+    ASSERT_EQ(ss.field(), buf + 9);
+
+    // "terminated"
+    ++ss;
+    ASSERT_TRUE(ss != nullptr);
+    ASSERT_EQ(10ul, ss.length());
+    ASSERT_EQ(ss.field(), buf + 16);
+
+    // "string"
+    ++ss;
+    ASSERT_TRUE(ss != nullptr);
+    ASSERT_EQ(6ul, ss.length());
+    ASSERT_EQ(ss.field(), buf + 28);
+
+    ++ss;
+    ASSERT_FALSE(ss);
+    ASSERT_EQ(0ul, ss.length());
+    ASSERT_EQ(ss.field(), buf + len);
+
+    delete[] buf;
+}
+
 TEST_F(StringSplitterTest, key_value_pairs_splitter_sanity) {
     std::string kvstr = "key1=value1&&&key2=value2&key3=value3&===&key4=&=&=value5";
     for (int i = 0 ; i < 3; ++i) {
         // Test three constructors
-        butil::KeyValuePairsSplitter* psplitter = NULL;
+        butil::KeyValuePairsSplitter* psplitter = nullptr;
         if (i == 0) {
             psplitter = new butil::KeyValuePairsSplitter(kvstr, '&', '=');
         } else if (i == 1) {

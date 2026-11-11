@@ -18,6 +18,8 @@
 
 // Since kDefaultTotalBytesLimit is private, we need some hacks to get the limit.
 // Works for pb 2.4, 2.6, 3.0
+#include "google/protobuf/stubs/common.h"
+#if GOOGLE_PROTOBUF_VERSION < 4022000
 #define private public
 #include <google/protobuf/io/coded_stream.h>
 const int PB_TOTAL_BYETS_LIMITS_RAW =
@@ -25,6 +27,12 @@ const int PB_TOTAL_BYETS_LIMITS_RAW =
 const uint64_t PB_TOTAL_BYETS_LIMITS =
     PB_TOTAL_BYETS_LIMITS_RAW < 0 ? (uint64_t)-1LL : PB_TOTAL_BYETS_LIMITS_RAW;
 #undef private
+#else
+#include <google/protobuf/io/coded_stream.h>
+const int PB_TOTAL_BYETS_LIMITS_RAW = INT_MAX;
+const uint64_t PB_TOTAL_BYETS_LIMITS =
+    PB_TOTAL_BYETS_LIMITS_RAW < 0 ? (uint64_t)-1LL : PB_TOTAL_BYETS_LIMITS_RAW;
+#endif
 
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/text_format.h>
@@ -93,13 +101,13 @@ const Protocol* FindProtocol(ProtocolType type) {
     const size_t index = type;
     if (index >= MAX_PROTOCOL_SIZE) {
         LOG(ERROR) << "ProtocolType=" << type << " is out of range";
-        return NULL;
+        return nullptr;
     }
     ProtocolEntry* const protocol_map = get_protocol_map();
     if (protocol_map[index].valid.load(butil::memory_order_acquire)) {
         return &protocol_map[index].protocol;
     }
-    return NULL;
+    return nullptr;
 }
 
 void ListProtocols(std::vector<Protocol>* vec) {
@@ -122,16 +130,11 @@ void ListProtocols(std::vector<std::pair<ProtocolType, Protocol> >* vec) {
     }
 }
 
-void SerializeRequestDefault(butil::IOBuf* buf,
-                             Controller* cntl,
+void SerializeRequestDefault(butil::IOBuf* buf, Controller* cntl,
                              const google::protobuf::Message* request) {
     // Check sanity of request.
     if (!request) {
         return cntl->SetFailed(EREQUEST, "`request' is NULL");
-    }
-    if (request->GetDescriptor() == SerializedRequest::descriptor()) {
-        buf->append(((SerializedRequest*)request)->serialized_data());
-        return;
     }
     if (!request->IsInitialized()) {
         return cntl->SetFailed(
@@ -190,7 +193,7 @@ const char* ProtocolTypeToString(ProtocolType type) {
     GlobalInitializeOrDie();
     
     const Protocol* p = FindProtocol(type);
-    if (p != NULL) {
+    if (p != nullptr) {
         return p->name;
     }
     return "unknown";

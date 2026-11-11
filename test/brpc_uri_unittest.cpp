@@ -15,9 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <gflags/gflags.h>
 #include <gtest/gtest.h>
 
 #include "brpc/uri.h"
+
+namespace brpc {
+DECLARE_uint32(http_max_query_count);
+}
 
 TEST(URITest, everything) {
     brpc::URI uri;
@@ -87,6 +92,50 @@ TEST(URITest, only_host) {
     ASSERT_EQ("", uri.user_info());
     ASSERT_EQ("", uri.fragment());
     ASSERT_EQ(0u, uri.QueryCount());
+}
+
+TEST(URITest, out_of_range_port) {
+    brpc::URI uri;
+    // 4294967377 == 2^32 + 81. Without a range check the accumulated value
+    // narrows to int and yields 81, so port() must not return the wrapped port.
+    ASSERT_EQ(0, uri.SetHttpURL("foo://www.baidu.com:4294967377/s"));
+    ASSERT_EQ(-1, uri.port());
+    ASSERT_EQ("www.baidu.com", uri.host());
+    ASSERT_EQ("/s", uri.path());
+
+    // Just above the valid range is rejected too.
+    ASSERT_EQ(0, uri.SetHttpURL("foo://www.baidu.com:65536/s"));
+    ASSERT_EQ(-1, uri.port());
+    ASSERT_EQ("www.baidu.com", uri.host());
+
+    // A very long run of digits must not overflow the accumulator.
+    ASSERT_EQ(0, uri.SetHttpURL("foo://www.baidu.com:999999999999999999999999/s"));
+    ASSERT_EQ(-1, uri.port());
+    ASSERT_EQ("www.baidu.com", uri.host());
+
+    // An out-of-range value padded with a long run of leading zeros must not
+    // wrap the accumulator into a valid-looking port either.
+    ASSERT_EQ(0, uri.SetHttpURL(
+            "foo://www.baidu.com:1000000000000000000000000000000000000"
+            "0000000000000000000000000000/s"));
+    ASSERT_EQ(-1, uri.port());
+    ASSERT_EQ("www.baidu.com", uri.host());
+
+    // Leading zeros on an in-range value still parse to that value.
+    ASSERT_EQ(0, uri.SetHttpURL("foo://www.baidu.com:00080/s"));
+    ASSERT_EQ(80, uri.port());
+    ASSERT_EQ("www.baidu.com", uri.host());
+
+    // Boundaries of the valid range still parse.
+    ASSERT_EQ(0, uri.SetHttpURL("foo://www.baidu.com:65535/s"));
+    ASSERT_EQ(65535, uri.port());
+    ASSERT_EQ(0, uri.SetHttpURL("foo://www.baidu.com:0/s"));
+    ASSERT_EQ(0, uri.port());
+
+    // Host header path goes through the same helper.
+    uri.SetHostAndPort("www.baidu.com:4294967377");
+    ASSERT_EQ(-1, uri.port());
+    ASSERT_EQ("www.baidu.com", uri.host());
 }
 
 TEST(URITest, no_scheme) {
@@ -297,10 +346,91 @@ TEST(URITest, invalid_spaces) {
     ASSERT_STREQ("Invalid space in fragment", uri.status().error_cstr());
 }
 
+TEST(URITest, invalid_crlf) {
+    brpc::URI uri;
+    // A CR/LF that reaches _host, _path, _query or _fragment is written
+    // verbatim into the "Host" header and the request line, which appends
+    // headers to the outbound request or starts a second one. None of these
+    // contains a space, so the "Invalid space" checks cannot catch them.
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com\r\nX-Injected:1/s"));
+    ASSERT_STREQ("Invalid CR/LF in url", uri.status().error_cstr());
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s\r\nX-Injected:1"));
+    ASSERT_STREQ("Invalid CR/LF in url", uri.status().error_cstr());
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s?wd=uri\r\nX-Injected:1"));
+    ASSERT_STREQ("Invalid CR/LF in url", uri.status().error_cstr());
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s#frag\r\nX-Injected:1"));
+    ASSERT_STREQ("Invalid CR/LF in url", uri.status().error_cstr());
+    // A bare CR or LF is enough, the pair is not required.
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s\nX-Injected:1"));
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s\rX-Injected:1"));
+    // Nothing of the rejected URL is left behind.
+    ASSERT_EQ("", uri.host());
+    ASSERT_EQ("", uri.path());
+
+    ASSERT_EQ(-1, uri.SetH2Path("/s\r\nX-Injected:1"));
+    ASSERT_STREQ("Invalid CR/LF in :path", uri.status().error_cstr());
+    ASSERT_EQ(-1, uri.SetH2Path("/s?wd=uri\r\nX-Injected:1"));
+    ASSERT_STREQ("Invalid CR/LF in :path", uri.status().error_cstr());
+    ASSERT_EQ(-1, uri.SetH2Path("/s#frag\r\nX-Injected:1"));
+    ASSERT_STREQ("Invalid CR/LF in :path", uri.status().error_cstr());
+    ASSERT_EQ("", uri.path());
+    // The next path clears the failure rather than inheriting it.
+    ASSERT_EQ(0, uri.SetH2Path("/s?wd=uri")) << uri.status();
+}
+
 TEST(URITest, invalid_query) {
     brpc::URI uri;
     ASSERT_EQ(0, uri.SetHttpURL("http://a.b.c/?a-b-c:def"));
     ASSERT_EQ("a-b-c:def", uri.query());
+}
+
+TEST(URITest, too_many_queries) {
+    GFLAGS_NAMESPACE::FlagSaver flag_saver;
+    brpc::FLAGS_http_max_query_count = 4;
+
+    brpc::URI uri;
+    ASSERT_EQ(0, uri.SetHttpURL("http://a.com/s?a=1&b=2&c=3&d=4")) << uri.status();
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s?a=1&b=2&c=3&d=4&e=5"));
+    ASSERT_STREQ("More than 4 query parameters in url", uri.status().error_cstr());
+    // Repeated keys collapse into one map entry, but the splitter still walks
+    // every segment, so they count.
+    ASSERT_EQ(-1, uri.SetHttpURL("http://a.com/s?a=1&a=2&a=3&a=4&a=5"));
+    // An empty query is not one parameter.
+    brpc::FLAGS_http_max_query_count = 1;
+    ASSERT_EQ(0, uri.SetHttpURL("http://a.com/s?")) << uri.status();
+
+    brpc::FLAGS_http_max_query_count = 4;
+    ASSERT_EQ(0, uri.SetH2Path("/s?a=1&b=2&c=3&d=4")) << uri.status();
+    ASSERT_EQ(-1, uri.SetH2Path("/s?a=1&b=2&c=3&d=4&e=5"));
+    ASSERT_STREQ("More than 4 query parameters in :path", uri.status().error_cstr());
+    // The next path clears the failure rather than inheriting it.
+    ASSERT_EQ(0, uri.SetH2Path("/s?a=1")) << uri.status();
+
+    brpc::FLAGS_http_max_query_count = 0;
+    ASSERT_EQ(0, uri.SetHttpURL("http://a.com/s?a=1&b=2&c=3&d=4&e=5")) << uri.status();
+    ASSERT_EQ(0, uri.SetH2Path("/s?a=1&b=2&c=3&d=4&e=5")) << uri.status();
+}
+
+TEST(URITest, high_bit_bytes) {
+    // Bytes >= 0x80 (e.g. UTF-8 in the host/path) index the +128-biased
+    // action table. On unsigned-char platforms they would read past the
+    // 256-entry table; this trips a buffer-overflow read under ASan without
+    // the signed-char fold. They are ordinary characters for the parser.
+    brpc::URI uri;
+    const std::string url =
+        "http://user:passwd@\xc3\xa9.example.com/\xc3\xa9?k=\xc3\xa9#\xc3\xa9";
+    ASSERT_EQ(0, uri.SetHttpURL(url)) << uri.status();
+    ASSERT_EQ("\xc3\xa9.example.com", uri.host());
+    ASSERT_EQ("/\xc3\xa9", uri.path());
+    ASSERT_EQ("k=\xc3\xa9", uri.query());
+    ASSERT_EQ("\xc3\xa9", uri.fragment());
+
+    std::string scheme;
+    std::string host_out;
+    int port_out = -1;
+    ASSERT_EQ(0, brpc::ParseURL(url.c_str(), &scheme, &host_out, &port_out));
+    ASSERT_EQ("http", scheme);
+    ASSERT_EQ("\xc3\xa9.example.com", host_out);
 }
 
 TEST(URITest, print_url) {

@@ -47,12 +47,11 @@ typedef ScopedGeneric<int, internal::ScopedFDCloseTraits> ScopedFD;
 
 //// Automatically closes |FILE*|s.
 class ScopedFILE {
-    MOVE_ONLY_TYPE_FOR_CPP_03(ScopedFILE, RValue);
 public:
-    ScopedFILE() : _fp(NULL) {}
+    ScopedFILE() : _fp(nullptr) {}
 
     // Open file at |path| with |mode|.
-    // If fopen failed, operator FILE* returns NULL and errno is set.
+    // If fopen failed, operator FILE* returns nullptr and errno is set.
     ScopedFILE(const char *path, const char *mode) {
         _fp = fopen(path, mode);
     }
@@ -61,15 +60,17 @@ public:
     // destructor, otherwise the behavior is undefined
     explicit ScopedFILE(FILE *fp) :_fp(fp) {}
 
-    ScopedFILE(RValue rvalue) {
-        _fp = rvalue.object->_fp;
-        rvalue.object->_fp = NULL;
-    }
+    ScopedFILE(const ScopedFILE&) = delete;
+    ScopedFILE& operator=(const ScopedFILE&) = delete;
+
+    ScopedFILE(ScopedFILE&& other) noexcept : _fp(other.release()) {}
+
+    ScopedFILE& operator=(ScopedFILE&&) = delete;
 
     ~ScopedFILE() {
-        if (_fp != NULL) {
+        if (_fp != nullptr) {
             fclose(_fp);
-            _fp = NULL;
+            _fp = nullptr;
         }
     }
 
@@ -78,20 +79,20 @@ public:
         reset(fopen(path, mode));
     }
 
-    void reset() { reset(NULL); }
+    void reset() { reset(nullptr); }
 
     void reset(FILE *fp) {
-        if (_fp != NULL) {
+        if (_fp != nullptr) {
             fclose(_fp);
-            _fp = NULL;
+            _fp = nullptr;
         }
         _fp = fp;
     }
 
-    // Set internal FILE* to NULL and return previous value.
+    // Set internal FILE* to nullptr and return previous value.
     FILE* release() {
         FILE* const prev_fp = _fp;
-        _fp = NULL;
+        _fp = nullptr;
         return prev_fp;
     }
     

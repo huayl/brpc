@@ -45,9 +45,18 @@ void BadMethodService::no_method(::google::protobuf::RpcController* cntl_base,
 
     std::ostringstream os;
     os << "Missing method name for service=" << request->service_name() << '.';
+
+    // Requests from the public port must not learn anything more about the
+    // services of the server when ServerOptions.internal_port is set,
+    // especially not the methods of a builtin service.
+    if (cntl->is_security_mode()) {
+        cntl->SetFailed(ENOMETHOD, "%s", os.str().c_str());
+        return;
+    }
+
     const Server::ServiceProperty* sp = ServerPrivateAccessor(server)
         .FindServicePropertyAdaptively(request->service_name());
-    if (sp != NULL && sp->service != NULL) {
+    if (sp != nullptr && sp->service != nullptr) {
         const google::protobuf::ServiceDescriptor* sd =
             sp->service->GetDescriptor();
         os << " Available methods are: " << newline << newline;
@@ -58,7 +67,7 @@ void BadMethodService::no_method(::google::protobuf::RpcController* cntl_base,
                << ");" << newline;
         }
     }
-    if (sp != NULL && sp->restful_map != NULL) {
+    if (sp != nullptr && sp->restful_map != nullptr) {
         os << " This path is associated with a RestfulMap!";
     }
     cntl->SetFailed(ENOMETHOD, "%s", os.str().c_str());

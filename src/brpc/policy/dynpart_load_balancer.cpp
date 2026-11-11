@@ -95,9 +95,6 @@ size_t DynPartLoadBalancer::AddServersInBatch(
 size_t DynPartLoadBalancer::RemoveServersInBatch(
     const std::vector<ServerId>& servers) {
     const size_t n = _db_servers.Modify(BatchRemove, servers);
-    LOG_IF(ERROR, n != servers.size())
-        << "Fail to RemoveServersInBatch, expected " << servers.size()
-        << " actually " << n;
     return n;
 }
 
@@ -117,7 +114,13 @@ int DynPartLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
         return EHOSTDOWN;
     }
     int64_t total_weight = 0;
-    std::pair<SocketUniquePtr, int64_t> ptrs[8];
+    std::pair<SocketUniquePtr, int64_t> stack_ptrs[8];
+    std::vector<std::pair<SocketUniquePtr, int64_t>> heap_ptrs;
+    std::pair<SocketUniquePtr, int64_t>* ptrs = stack_ptrs;
+    if (n > ARRAY_SIZE(stack_ptrs)) {
+        heap_ptrs.resize(n);
+        ptrs = heap_ptrs.data();
+    }
     int nptr = 0;
     bool exclusion = true;
     do {
@@ -127,13 +130,8 @@ int DynPartLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
                 && Socket::Address(id, &ptrs[nptr].first) == 0) {
                 int w = schan::GetSubChannelWeight(ptrs[nptr].first->user());
                 total_weight += w;
-                if (nptr < 8) {
-                    ptrs[nptr].second = total_weight;
-                    ++nptr;
-                } else {
-                    CHECK(false) << "Not supported yet";
-                    abort();
-                }
+                ptrs[nptr].second = total_weight;
+                ++nptr;
             }
         }
         if (nptr != 0) {
@@ -162,7 +160,7 @@ int DynPartLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) {
 }
 
 DynPartLoadBalancer* DynPartLoadBalancer::New(const butil::StringPiece&) const {
-    return new (std::nothrow) DynPartLoadBalancer;
+    return new DynPartLoadBalancer;
 }
 
 void DynPartLoadBalancer::Destroy() {

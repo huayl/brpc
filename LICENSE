@@ -757,7 +757,141 @@ src/brpc/callback.h: 3-clause BSD
 
 --------------------------------------------------------------------------------
 
-src/butil/(some files), test/(some files): 3-clause BSD
+src/butil/at_exit.*
+src/butil/atomic*
+src/butil/auto_reset.h
+src/butil/base64.*
+src/butil/base_export.h
+src/butil/base_paths.cc
+src/butil/basictypes.h
+src/butil/big_endian.*
+src/butil/bits.h
+src/butil/build_config.h
+src/butil/cancelable_callback.h
+src/butil/compiler_specific.h
+src/butil/containers/*
+src/butil/cpu.*
+src/butil/debug/*
+src/butil/environment.*
+src/butil/file_*
+src/butil/files/dir_reader_fallback.h
+src/butil/files/dir_reader_linux.h
+src/butil/files/dir_reader_posix.h
+src/butil/files/file.*
+src/butil/files/file_enumerator*
+src/butil/files/file_p*
+src/butil/files/memory_mapped_file*
+src/butil/files/scoped*
+src/butil/float_util.h
+src/butil/format_macros.h
+src/butil/gtest_prod_util.h
+src/butil/guid.cc
+src/butil/guid.h
+src/butil/guid_posix.cc
+src/butil/hash.cc
+src/butil/hash.h
+src/butil/lazy_instance.cc
+src/butil/lazy_instance.h
+src/butil/location.cc
+src/butil/location.h
+src/butil/mac/bundle_locations.h
+src/butil/mac/bundle_locations.mm
+src/butil/mac/foundation_util.h
+src/butil/mac/foundation_util.mm
+src/butil/mac/scoped_cftyperef.h
+src/butil/mac/scoped_mach_port.cc
+src/butil/mac/scoped_mach_port.h
+src/butil/mac/scoped_typeref.h
+src/butil/macros.h
+src/butil/memory/aligned_memory.cc
+src/butil/memory/aligned_memory.h
+src/butil/memory/linked_ptr.h
+src/butil/memory/manual_constructor.h
+src/butil/memory/raw_scoped_refptr_mismatch_checker.h
+src/butil/memory/ref_counted.cc
+src/butil/memory/ref_counted.h
+src/butil/memory/ref_counted_memory.cc
+src/butil/memory/ref_counted_memory.h
+src/butil/memory/scoped_open_process.h
+src/butil/memory/scoped_policy.h
+src/butil/memory/scoped_ptr.h
+src/butil/memory/scoped_vector.h
+src/butil/memory/singleton.cc
+src/butil/memory/singleton.h
+src/butil/memory/singleton_objc.h
+src/butil/memory/weak_ptr.cc
+src/butil/memory/weak_ptr.h
+src/butil/move.h
+src/butil/numerics/safe_conversions.h
+src/butil/numerics/safe_conversions_impl.h
+src/butil/numerics/safe_math.h
+src/butil/numerics/safe_math_impl.h
+src/butil/observer_list.h
+src/butil/port.h
+src/butil/posix/eintr_wrapper.h
+src/butil/posix/file_descriptor_shuffle.cc
+src/butil/posix/file_descriptor_shuffle.h
+src/butil/posix/global_descriptors.cc
+src/butil/posix/global_descriptors.h
+src/butil/rand_util.cc
+src/butil/rand_util.h
+src/butil/rand_util_posix.cc
+src/butil/safe_strerror_posix.cc
+src/butil/safe_strerror_posix.h
+src/butil/scoped_clear_errno.h
+src/butil/scoped_generic.h
+src/butil/scoped_observer.h
+src/butil/sha1.h
+src/butil/sha1_portable.cc
+src/butil/stl_util.h
+src/butil/strings/latin1_string_conversions.cc
+src/butil/strings/latin1_string_conversions.h
+src/butil/strings/nullable_string16.cc
+src/butil/strings/nullable_string16.h
+src/butil/strings/safe_sprintf.cc
+src/butil/strings/safe_sprintf.h
+src/butil/strings/string16.cc
+src/butil/strings/string16.h
+src/butil/strings/string_number_conversions.cc
+src/butil/strings/string_number_conversions.h
+src/butil/strings/string_piece.cc
+src/butil/strings/string_piece.h
+src/butil/strings/string_split.cc
+src/butil/strings/string_split.h
+src/butil/strings/string_tokenizer.h
+src/butil/strings/string_util.cc
+src/butil/strings/string_util.h
+src/butil/strings/string_util_constants.cc
+src/butil/strings/string_util_posix.h
+src/butil/strings/stringize_macros.h
+src/butil/strings/stringprintf.cc
+src/butil/strings/stringprintf.h
+src/butil/strings/sys_string_conversions.h
+src/butil/strings/sys_string_conversions_mac.mm
+src/butil/strings/sys_string_conversions_posix.cc
+src/butil/strings/utf_offset_string_conversions.cc
+src/butil/strings/utf_offset_string_conversions.h
+src/butil/strings/utf_string_conversion_utils.cc
+src/butil/strings/utf_string_conversion_utils.h
+src/butil/strings/utf_string_conversions.cc
+src/butil/strings/utf_string_conversions.h
+src/butil/synchronization/cancellation_flag.*
+src/butil/synchronization/condition_variable.h
+src/butil/synchronization/condition_variable_posix.cc
+src/butil/synchronization/spin_wait.h
+src/butil/synchronization/waitable_event.h
+src/butil/synchronization/waitable_event_posix.cc
+src/butil/sys_byteorder.h
+src/butil/third_party/symbolize/glog/*
+src/butil/threading/*
+src/butil/time/*
+src/butil/type_traits.h
+src/butil/version.*
+test/*.cc
+test/memory_unittest_mac.h
+test/multiprocess_func_list.h
+test/scoped_locale.h
+test/test_switches.h
 
 Some portions of these files are derived from code in the Chromium project,
 copyright (c) Google inc and (c) The Chromium Authors and licensed under the
@@ -789,4 +923,111 @@ copyright (c) Google inc and (c) The Chromium Authors and licensed under the
   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+src/butil/base64url.*
+test/base64url_unittest.cc
+
+Some portions of these files are derived from code in the Chromium project,
+copyright The Chromium Authors and licensed under the 3-clause BSD license:
+
+  Copyright 2015 The Chromium Authors
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+     * Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+     * Redistributions in binary form must reproduce the above
+  copyright notice, this list of conditions and the following disclaimer
+  in the documentation and/or other materials provided with the
+  distribution.
+     * Neither the name of Google LLC nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+--------------------------------------------------------------------------------
+
+registry/modules/libunwind/**: licensed under the following terms:
+
+  Forked from the Bazel Central Registry (BCR):
+    https://github.com/bazelbuild/bazel-central-registry/tree/main/modules/libunwind
+
+  The upstream files are distributed under the Apache License, Version 2.0,
+  the same license as brpc itself (the full text of which is reproduced at
+  the top of this LICENSE file). brpc has modified the forked files; per the
+  Apache License 2.0 §4(b), the modifications are summarized below:
+
+    - registry/modules/libunwind/<version>/MODULE.bazel
+    - registry/modules/libunwind/<version>/overlay/MODULE.bazel
+        Append the suffix `.brpc-no-unwind` to the `version` field, marking
+        these as brpc's variant of the libunwind module.
+
+    - registry/modules/libunwind/<version>/overlay/BUILD.bazel
+        Add the `hide_unwind_symbols` config_setting (gated by
+        `--define=libunwind_hide_unwind_symbols=true`); when the switch is
+        on, drop `src/unwind/*.c` (the GCC `_Unwind_*` ABI compatibility
+        layer) from `unwind_srcs` so the resulting libunwind does not export
+        `_Unwind_*` symbols. See docs/cn/bthread_tracer.md for the
+        rationale.
+
+    - registry/modules/libunwind/<version>/source.json
+        Update overlay file SHA-256 hashes to match the modified
+        BUILD.bazel / MODULE.bazel.
+
+    - registry/modules/libunwind/metadata.json
+        Replace the `versions` array with brpc's renamed versions.
+
+  The above only governs the build/source files brpc redistributes inside
+  registry/modules/libunwind/. The libunwind source code itself, downloaded
+  by Bazel from the URL pinned in source.json, remains governed by the
+  libunwind project's own license; see https://github.com/libunwind/libunwind
+  for details.
+
+--------------------------------------------------------------------------------
+
+homebrew-formula/protobuf@21.rb: licensed under the following terms:
+
+  Copied from Homebrew/homebrew-core at commit
+  cced3ef1d489fce4eba453a333619722c3a8dd17 (Formula/p/protobuf@21.rb), with
+  its deprecate!/disable! lines removed.
+
+  BSD 2-Clause License
+
+  Copyright (c) 2009-present, Homebrew contributors
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice, this
+    list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

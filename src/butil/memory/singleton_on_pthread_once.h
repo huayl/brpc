@@ -25,7 +25,13 @@
 
 namespace butil {
 
-template <typename T> class GetLeakySingleton {
+template <typename T>
+T* create_leaky_singleton_obj() {
+    return new T();
+}
+
+template <typename T>
+class GetLeakySingleton {
 public:
     static butil::subtle::AtomicWord g_leaky_singleton_untyped;
     static pthread_once_t g_create_leaky_singleton_once;
@@ -39,7 +45,7 @@ pthread_once_t GetLeakySingleton<T>::g_create_leaky_singleton_once = PTHREAD_ONC
 
 template <typename T>
 void GetLeakySingleton<T>::create_leaky_singleton() {
-    T* obj = new T;
+    T* obj = create_leaky_singleton_obj<T>();
     butil::subtle::Release_Store(
         &g_leaky_singleton_untyped,
         reinterpret_cast<butil::subtle::AtomicWord>(obj));
@@ -63,8 +69,8 @@ inline T* get_leaky_singleton() {
         GetLeakySingleton<T>::g_leaky_singleton_untyped);
 }
 
-// True(non-NULL) if the singleton is created.
-// The returned object (if not NULL) can be used directly.
+// True(non-nullptr) if the singleton is created.
+// The returned object (if not nullptr) can be used directly.
 template <typename T>
 inline T* has_leaky_singleton() {
     return reinterpret_cast<T*>(

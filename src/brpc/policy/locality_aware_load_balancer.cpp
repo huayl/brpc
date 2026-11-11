@@ -55,12 +55,12 @@ bool LocalityAwareLoadBalancer::Add(Servers& bg, const Servers& fg,
     if (bg.weight_tree.capacity() < INITIAL_WEIGHT_TREE_SIZE) {
         bg.weight_tree.reserve(INITIAL_WEIGHT_TREE_SIZE);
     }
-    if (bg.server_map.seek(id) != NULL) {
+    if (bg.server_map.seek(id) != nullptr) {
         // The id duplicates.
         return false;
     }
     const size_t* pindex = fg.server_map.seek(id);
-    if (pindex == NULL) {
+    if (pindex == nullptr) {
         // Both fg and bg do not have the id. We create and insert a new Weight
         // structure. Later when we modify the other buffer(current fg), just
         // copy the pointer.
@@ -106,7 +106,7 @@ bool LocalityAwareLoadBalancer::Add(Servers& bg, const Servers& fg,
 bool LocalityAwareLoadBalancer::Remove(
     Servers& bg, SocketId id, LocalityAwareLoadBalancer* lb) {
     size_t* pindex = bg.server_map.seek(id);
-    if (NULL == pindex) {
+    if (nullptr == pindex) {
         // The id does not exist.
         return false;
     }
@@ -302,8 +302,7 @@ int LocalityAwareLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) 
             if (index < n) {
                 continue;
             }
-        } else if (Socket::Address(info.server_id, out->ptr) == 0
-                   && (*out->ptr)->IsAvailable()) {
+        } else if (IsServerAvailable(info.server_id, out->ptr)) {
             if ((ntry + 1) == n  // Instead of fail with EHOSTDOWN, we prefer
                                  // choosing the server again.
                 || !ExcludedServers::IsExcluded(in.excluded, info.server_id)) {
@@ -334,9 +333,13 @@ int LocalityAwareLoadBalancer::SelectServer(const SelectIn& in, SelectOut* out) 
             if (dice >= left + self + diff) {
                 dice -= left + self + diff;
                 index = index * 2 + 2;
-                if (index < n) {
-                    continue;
-                }
+            } else {
+		// left child may contain available nodes
+		dice = butil::fast_rand_less_than(left);
+		index = index * 2 + 1;
+	    }
+	    if (index < n) {
+		continue;
             }
             if (++ntry >= n) {
                 break;
@@ -359,7 +362,7 @@ void LocalityAwareLoadBalancer::Feedback(const CallInfo& info) {
         return;
     }
     const size_t* pindex = s->server_map.seek(info.server_id);
-    if (NULL == pindex) {
+    if (nullptr == pindex) {
         return;
     }
     const size_t index = *pindex;
@@ -467,9 +470,9 @@ int64_t LocalityAwareLoadBalancer::Weight::Update(
     return ResetWeight(index, end_time_us);
 }
 
-LocalityAwareLoadBalancer* LocalityAwareLoadBalancer::New(
-    const butil::StringPiece&) const {
-    return new (std::nothrow) LocalityAwareLoadBalancer;
+LocalityAwareLoadBalancer*
+LocalityAwareLoadBalancer::New(const butil::StringPiece&) const {
+    return new LocalityAwareLoadBalancer;
 }
 
 void LocalityAwareLoadBalancer::Destroy() {

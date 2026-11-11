@@ -17,11 +17,12 @@
 
 #include <gtest/gtest.h>
 #include <errno.h>
+#include <cstdint>
 #include "butil/thread_local.h"
 
 namespace {
 
-BAIDU_THREAD_LOCAL int * dummy = NULL;
+BUTIL_THREAD_LOCAL(int*, dummy, nullptr);
 const size_t NTHREAD = 8;
 static bool processed[NTHREAD+1];
 static bool deleted[NTHREAD+1];
@@ -63,21 +64,22 @@ protected:
 };
 
 
+// Test the legacy native TLS keyword on pthreads (no bthread suspension).
 BAIDU_THREAD_LOCAL void* x;
 
 void* foo(void* arg) {
     x = arg;
     usleep(10000);
     printf("x=%p\n", x);
-    return NULL;
+    return nullptr;
 }
 
 TEST_F(BaiduThreadLocalTest, thread_local_keyword) {
     pthread_t th[2];
-    pthread_create(&th[0], NULL, foo, (void*)1);
-    pthread_create(&th[1], NULL, foo, (void*)2);
-    pthread_join(th[0], NULL);
-    pthread_join(th[1], NULL);
+    pthread_create(&th[0], nullptr, foo, (void*)1);
+    pthread_create(&th[1], nullptr, foo, (void*)2);
+    pthread_join(th[0], nullptr);
+    pthread_join(th[1], nullptr);
 }
 
 void* yell(void*) {
@@ -88,7 +90,7 @@ void* yell(void*) {
     EXPECT_EQ(p, butil::get_thread_local<YellObj>());
     EXPECT_EQ(2, YellObj::nc);
     EXPECT_EQ(0, YellObj::nd);
-    return NULL;
+    return nullptr;
 }
 
 TEST_F(BaiduThreadLocalTest, get_thread_local) {
@@ -102,17 +104,17 @@ TEST_F(BaiduThreadLocalTest, get_thread_local) {
     ASSERT_EQ(1, YellObj::nc);
     ASSERT_EQ(0, YellObj::nd);
     pthread_t th;
-    ASSERT_EQ(0, pthread_create(&th, NULL, yell, NULL));
-    pthread_join(th, NULL);
+    ASSERT_EQ(0, pthread_create(&th, nullptr, yell, nullptr));
+    pthread_join(th, nullptr);
     EXPECT_EQ(2, YellObj::nc);
     EXPECT_EQ(1, YellObj::nd);
 }
 
 void delete_dummy(void* arg) {
     *(bool*)arg = true;
-    if (dummy) {
-        delete dummy;
-        dummy = NULL;
+    if (dummy()) {
+        delete dummy();
+        dummy() = nullptr;
     } else {
         printf("dummy is NULL\n");
     }
@@ -121,15 +123,15 @@ void delete_dummy(void* arg) {
 void* proc_dummy(void* arg) {
     bool *p = (bool*)arg;
     *p = true;
-    EXPECT_TRUE(dummy == NULL);
-    dummy = new int(p - processed);
+    EXPECT_TRUE(dummy() == nullptr);
+    dummy() = new int(p - processed);
     butil::thread_atexit(delete_dummy, deleted + (p - processed));
-    return NULL;
+    return nullptr;
 }
 
 TEST_F(BaiduThreadLocalTest, sanity) {
     errno = 0;
-    ASSERT_EQ(-1, butil::thread_atexit(NULL));
+    ASSERT_EQ(-1, butil::thread_atexit(nullptr));
     ASSERT_EQ(EINVAL, errno);
 
     processed[NTHREAD] = false;
@@ -140,18 +142,18 @@ TEST_F(BaiduThreadLocalTest, sanity) {
     for (size_t i = 0; i < NTHREAD; ++i) {
         processed[i] = false;
         deleted[i] = false;
-        ASSERT_EQ(0, pthread_create(&th[i], NULL, proc_dummy, processed + i));
+        ASSERT_EQ(0, pthread_create(&th[i], nullptr, proc_dummy, processed + i));
     }
     for (size_t i = 0; i < NTHREAD; ++i) {
-        ASSERT_EQ(0, pthread_join(th[i], NULL));
+        ASSERT_EQ(0, pthread_join(th[i], nullptr));
         ASSERT_TRUE(processed[i]);
         ASSERT_TRUE(deleted[i]);
     }
 }
 
-static std::ostringstream* oss = NULL;
+static std::ostringstream* oss = nullptr;
 inline std::ostringstream& get_oss() {
-    if (oss == NULL) {
+    if (oss == nullptr) {
         oss = new std::ostringstream;
     }
     return *oss;
@@ -180,8 +182,8 @@ static void check_result() {
 }
 
 TEST_F(BaiduThreadLocalTest, call_order_and_cancel) {
-    butil::thread_atexit_cancel(NULL);
-    butil::thread_atexit_cancel(NULL, NULL);
+    butil::thread_atexit_cancel(nullptr);
+    butil::thread_atexit_cancel(nullptr, nullptr);
 
     ASSERT_EQ(0, butil::thread_atexit(check_result));
 
@@ -191,12 +193,12 @@ TEST_F(BaiduThreadLocalTest, call_order_and_cancel) {
     ASSERT_EQ(0, butil::thread_atexit(fun3, (void*)1));
     ASSERT_EQ(0, butil::thread_atexit(fun3, (void*)1));
     ASSERT_EQ(0, butil::thread_atexit(fun3, (void*)2));
-    ASSERT_EQ(0, butil::thread_atexit(fun4, NULL));
+    ASSERT_EQ(0, butil::thread_atexit(fun4, nullptr));
 
-    butil::thread_atexit_cancel(NULL);
-    butil::thread_atexit_cancel(NULL, NULL);
+    butil::thread_atexit_cancel(nullptr);
+    butil::thread_atexit_cancel(nullptr, nullptr);
     butil::thread_atexit_cancel(fun1);
-    butil::thread_atexit_cancel(fun3, NULL);
+    butil::thread_atexit_cancel(fun3, nullptr);
     butil::thread_atexit_cancel(fun3, (void*)1);
 }
 

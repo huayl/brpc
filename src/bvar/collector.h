@@ -28,13 +28,31 @@
 
 namespace bvar {
 
+namespace detail {
+// Permanently stop the process-wide collector and wait for its callbacks.
+// Discard pending samples without dumping. This is not a barrier for submit():
+// a submission overlapping shutdown may miss the final cleanup and remain
+// allocated until process termination, without another dump callback.
+// Internal exit hook, not a supported user API. May be called repeatedly, but
+// never from a collector callback. Does not create or delete the singleton.
+// Owners of destructible callback dependencies must call this before teardown;
+// the collector may have been initialized before those dependencies.
+void StopCollector();
+}  // namespace detail
+
+static const size_t INVALID_SAMPLING_RANGE = 0;
+
+inline bool is_sampling_range_valid(size_t sampling_range) {
+    return sampling_range > 0;
+}
+
 // Containing the context for limiting sampling speed.
 struct CollectorSpeedLimit {
     // [Managed by Collector, don't change!]
     size_t sampling_range;
     bool ever_grabbed;
     butil::static_atomic<int> count_before_grabbed;
-    int64_t first_sample_real_us;
+    int64_t first_sample_us;
 };
 
 static const size_t COLLECTOR_SAMPLING_BASE = 16384;
@@ -47,6 +65,7 @@ class Collected;
 // For processing samples in batch before dumping.
 class CollectorPreprocessor {
 public:
+    virtual ~CollectorPreprocessor() = default;
     virtual void process(std::vector<Collected*>& samples) = 0;
 };
 
@@ -68,6 +87,9 @@ public:
     // from the timestamp updated by collecting thread(which basically means
     // the thread is not scheduled by OS in time), this sample is directly
     // destroy()-ed to avoid memory explosion.
+    // Calls started after collector shutdown are destroy()-ed in-place.
+    // Calls overlapping shutdown may leave the sample allocated until process
+    // termination without calling destroy(), as described below.
     void submit(int64_t cpuwide_us);
     void submit() { submit(butil::cpuwide_time_us()); }
 
@@ -87,20 +109,20 @@ public:
     virtual void destroy() = 0;
 
     // Returns an object to control #samples collected per second.
-    // If NULL is returned, samples collected per second is limited by a
-    // global speed limit shared with other samples also returning NULL.
+    // If nullptr is returned, samples collected per second is limited by a
+    // global speed limit shared with other samples also returning nullptr.
     // All instances of a subclass of Collected should return a same instance
     // of CollectorSpeedLimit. The instance should remain valid during lifetime
     // of program.
     virtual CollectorSpeedLimit* speed_limit() = 0;
 
-    // If this method returns a non-NULL instance, it will be applied to
+    // If this method returns a non-nullptr instance, it will be applied to
     // samples in batch before dumping. You can sort or shuffle the samples
     // in the impl.
     // All instances of a subclass of Collected should return a same instance
     // of CollectorPreprocessor. The instance should remain valid during
     // lifetime of program.
-    virtual CollectorPreprocessor* preprocessor() { return NULL; }
+    virtual CollectorPreprocessor* preprocessor() { return nullptr; }
 };
 
 // To know if an instance should be sampled.
@@ -114,7 +136,7 @@ inline size_t is_collectable(CollectorSpeedLimit* speed_limit) {
         const size_t sampling_range = speed_limit->sampling_range;
         // fast_rand is faster than fast_rand_in
         if ((butil::fast_rand() & (COLLECTOR_SAMPLING_BASE - 1)) >= sampling_range) {
-            return 0;
+            return INVALID_SAMPLING_RANGE;
         }
         return sampling_range;
     }

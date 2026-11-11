@@ -41,6 +41,7 @@ enum Errno {
     ESSL                    = 1016;  // SSL related error
     EH2RUNOUTSTREAMS        = 1017;  // The H2 socket was run out of streams
     EREJECT                 = 1018;  // The Request is rejected
+    EPROGREADTIMEOUT        = 1019;  // The Progressive read timeout
 
     // Errno caused by server
     EINTERNAL               = 2001;  // Internal Server Error
@@ -49,4 +50,9 @@ enum Errno {
     ELIMIT                  = 2004;  // Reached server's limit on resources
     ECLOSE                  = 2005;  // Close socket initiatively
     EITP                    = 2006;  // Failed Itp response
+    ESHUTDOWNWRITE          = 2007;  // Shutdown write of socket
+
+    // Errno related to RDMA (may happen at both sides)
+    ERDMA                   = 3001;  // RDMA verbs error
+    ERDMAMEM                = 3002;  // Memory not registered for RDMA    
 }

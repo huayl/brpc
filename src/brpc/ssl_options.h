@@ -28,7 +28,7 @@ struct CertInfo {
     // Certificate in PEM format.
     // Note that CN and alt subjects will be extracted from the certificate,
     // and will be used as hostnames. Requests to this hostname (provided SNI
-    // extension supported) will be encrypted using this certifcate.
+    // extension supported) will be encrypted using this certificate.
     // Supported both file path and raw string
     std::string certificate;
 
@@ -41,6 +41,13 @@ struct CertInfo {
     std::vector<std::string> sni_filters;
 };
 
+enum class VerifyMode {
+    NOT_SET,
+    VERIFY_NONE,
+    VERIFY_PEER,
+    VERIFY_FAIL_IF_NO_PEER_CERT,
+};
+
 struct VerifyOptions {
     // Constructed with default options
     VerifyOptions();
@@ -50,10 +57,19 @@ struct VerifyOptions {
     // Default: 0
     int verify_depth;
 
+    // Set ssl verify mode for openssl
+    // If VERIFY_FAIL_IF_NO_PEER_CERT, it will set `SSL_VERIFY_FAIL_IF_NO_PEER_CERT | SSL_VERIFY_PEER`
+    // Default: NOT_SET
+    VerifyMode verify_mode;
+
     // Set the trusted CA file to verify the peer's certificate
     // If empty, use the system default CA files
     // Default: ""
     std::string ca_file_path;
+
+    // Set the expected DNS name or IP address in the peer's certificate
+    // Default: ""
+    std::string expected_peer_name;
 };
 
 // SSL options at client side
@@ -67,8 +83,8 @@ struct ChannelSSLOptions {
     std::string ciphers;
 
     // SSL protocols used for SSL handshake, separated by comma.
-    // Available protocols: SSLv3, TLSv1, TLSv1.1, TLSv1.2
-    // Default: TLSv1, TLSv1.1, TLSv1.2
+    // Available protocols: SSLv3, TLSv1, TLSv1.1, TLSv1.2, TLSv1.3
+    // Default: TLSv1, TLSv1.1, TLSv1.2, TLSv1.3
     std::string protocols;
 
     // When set, fill this into the SNI extension field during handshake,
@@ -83,6 +99,10 @@ struct ChannelSSLOptions {
     // Options used to verify the server's certificate
     // Default: see above
     VerifyOptions verify;
+
+    // Set the protocol preference of ALPN (Application-Layer Protocol Negotiation)
+    // Default: unset
+    std::vector<std::string> alpn_protocols;
 
     // TODO: Support CRL
 };
@@ -140,7 +160,7 @@ struct ServerSSLOptions {
     // Default: ""
     std::string ciphers;
 
-    // Name of the elliptic curve used to generate ECDH ephemerial keys
+    // Name of the elliptic curve used to generate ECDH ephemeral keys
     // Default: prime256v1
     std::string ecdhe_curve_name;
 
@@ -148,7 +168,12 @@ struct ServerSSLOptions {
     // Default: see above
     VerifyOptions verify;
 
-    // TODO: Support NPN & ALPN
+    // Options used to choose the most suitable application protocol, separated by comma.
+    // The NPN protocol is not commonly used, so only ALPN is supported.
+    // Available protocols: http, h2, baidu_std etc.
+    // Default: empty
+    std::string alpns;
+
     // TODO: Support OSCP stapling
 };
 

@@ -51,7 +51,7 @@ const int g_foo = 10;
 const int g_bar = 20;
     
 TEST_F(ExtensionTest, basic) {
-    ConstIntExtension()->Register("foo", NULL);
+    ConstIntExtension()->Register("foo", nullptr);
     ConstIntExtension()->Register("foo", &g_foo);
     ConstIntExtension()->Register("bar", &g_bar);
 
@@ -68,5 +68,5 @@ TEST_F(ExtensionTest, basic) {
 
     os.str("");
     ConstIntExtension()->List(os, ':');
-    ASSERT_EQ("bar:foo", os.str());
+    ASSERT_EQ("foo:bar", os.str());
 }

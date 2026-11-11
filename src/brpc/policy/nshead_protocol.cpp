@@ -42,7 +42,7 @@ void bthread_assign_data(void* data);
 namespace brpc {
 
 NsheadClosure::NsheadClosure(void* additional_space)
-    : _server(NULL)
+    : _server(nullptr)
     , _received_us(0)
     , _do_respond(true)
     , _additional_space(additional_space) {
@@ -69,7 +69,7 @@ void NsheadClosure::Run() {
     std::unique_ptr<NsheadClosure, DeleteNsheadClosure> recycle_ctx(this);
 
     ControllerPrivateAccessor accessor(&_controller);
-    Span* span = accessor.span();
+    auto span = accessor.span();
     if (span) {
         span->set_start_send_us(butil::cpuwide_time_us());
     }
@@ -95,6 +95,7 @@ void NsheadClosure::Run() {
         return;
     }
 
+    int64_t sent_us = 0;
     if (_do_respond) {
         // response uses request's head as default.
         // Notice that the response use request.head.log_id directly rather
@@ -112,8 +113,15 @@ void NsheadClosure::Run() {
         write_buf.append(_response.body.movable());
         // Have the risk of unlimited pending responses, in which case, tell
         // users to set max_concurrency.
+        ResponseWriteInfo args;
         Socket::WriteOptions wopt;
         wopt.ignore_eovercrowded = true;
+        bthread_id_t response_id = INVALID_BTHREAD_ID;
+        if (span) {
+            CHECK_EQ(0, bthread_id_create(&response_id, &args, HandleResponseWritten));
+            wopt.id_wait = response_id;
+            wopt.notify_on_success = true;
+        }
         if (sock->Write(&write_buf, &wopt) != 0) {
             const int errcode = errno;
             PLOG_IF(WARNING, errcode != EPIPE) << "Fail to write into " << *sock;
@@ -121,17 +129,22 @@ void NsheadClosure::Run() {
                                   sock->description().c_str());
             return;
         }
+
+        if (span) {
+            bthread_id_join(response_id);
+            // Do not care about the result of background writing.
+            sent_us = args.sent_us;
+        }
     }
     if (span) {
         // TODO: this is not sent
-        span->set_sent_us(butil::cpuwide_time_us());
+        span->set_sent_us(0 == sent_us ? butil::cpuwide_time_us() : sent_us);
     }
 }
 
 void NsheadClosure::SetMethodName(const std::string& full_method_name) {
     ControllerPrivateAccessor accessor(&_controller);
-    Span* span = accessor.span();
-    if (span) {
+    if (auto span = accessor.span()) {
         span->ResetServerSpanName(full_method_name);
     }
 }
@@ -169,6 +182,7 @@ ParseResult ParseNsheadMessage(butil::IOBuf* source,
     return MakeMessage(msg);
 }
 
+namespace {
 struct CallMethodInBackupThreadArgs {
     NsheadService* service;
     const Server* server;
@@ -177,6 +191,7 @@ struct CallMethodInBackupThreadArgs {
     NsheadMessage* response;
     NsheadClosure* done;
 };
+}
 
 static void CallMethodInBackupThread(void* void_args) {
     CallMethodInBackupThreadArgs* args = (CallMethodInBackupThreadArgs*)void_args;
@@ -216,7 +231,7 @@ void ProcessNsheadRequest(InputMessageBase* msg_base) {
     const nshead_t *req_head = (const nshead_t *)p;
 
     NsheadService* service = server->options().nshead_service;
-    if (service == NULL) {
+    if (service == nullptr) {
         LOG_EVERY_SECOND(WARNING) 
             << "Received nshead request however the server does not set"
             " ServerOptions.nshead_service, close the connection.";
@@ -242,11 +257,8 @@ void ProcessNsheadRequest(InputMessageBase* msg_base) {
     // Switch to service-specific error.
     non_service_error.release();
     MethodStatus* method_status = service->_status;
-    if (method_status) {
-        CHECK(method_status->OnRequested());
-    }
-    
-    void* sub_space = NULL;
+
+    void* sub_space = nullptr;
     if (service->_additional_space) {
         sub_space = (char*)space + sizeof(NsheadClosure);
     }
@@ -282,7 +294,7 @@ void ProcessNsheadRequest(InputMessageBase* msg_base) {
         bthread_assign_data((void*)&server->thread_local_options());
     }
 
-    Span* span = NULL;
+    std::shared_ptr<Span> span;
     if (IsTraceable(false)) {
         span = Span::CreateServerSpan(0, 0, 0, msg->base_real_us());
         accessor.set_span(span);
@@ -295,11 +307,25 @@ void ProcessNsheadRequest(InputMessageBase* msg_base) {
     }
 
     do {
+        // The limiter rejects the request when the concurrency reaches the
+        // upper limit, which is a normal situation under overload instead
+        // of an impossible state. Note that OnRequested() counts the
+        // request in either case, and ConcurrencyRemover in
+        // NsheadClosure::Run() counts it out.
+        if (method_status && !method_status->OnRequested()) {
+            cntl->SetFailed(ELIMIT,
+                            "Reached NsheadService's max_concurrency=%d",
+                            method_status->MaxConcurrency());
+            break;
+        }
         if (!server->IsRunning()) {
             cntl->SetFailed(ELOGOFF, "Server is stopping");
             break;
         }
-        if (socket->is_overcrowded()) {
+        if (RejectNonBuiltinAccessFromInternalPort(cntl, *server)) {
+            break;
+        }
+        if (socket->is_overcrowded() && !server->options().ignore_eovercrowded) {
             cntl->SetFailed(EOVERCROWDED, "Connection to %s is overcrowded",
                             butil::endpoint2str(socket->remote_side()).c_str());
             break;
@@ -313,6 +339,9 @@ void ProcessNsheadRequest(InputMessageBase* msg_base) {
         if (FLAGS_usercode_in_pthread && TooManyUserCode()) {
             cntl->SetFailed(ELIMIT, "Too many user code to run when"
                             " -usercode_in_pthread is on");
+            break;
+        }
+        if (!server->AcceptRequest(cntl)) {
             break;
         }
     } while (false);
@@ -341,7 +370,7 @@ void ProcessNsheadResponse(InputMessageBase* msg_base) {
     
     // Fetch correlation id that we saved before in `PackNsheadRequest'
     const CallId cid = { static_cast<uint64_t>(msg->socket()->correlation_id()) };
-    Controller* cntl = NULL;
+    Controller* cntl = nullptr;
     const int rc = bthread_id_lock(cid, (void**)&cntl);
     if (rc != 0) {
         LOG_IF(ERROR, rc != EINVAL && rc != EPERM)
@@ -350,8 +379,7 @@ void ProcessNsheadResponse(InputMessageBase* msg_base) {
     }
 
     ControllerPrivateAccessor accessor(cntl);
-    Span* span = accessor.span();
-    if (span) {
+    if (auto span = accessor.span()) {
         span->set_base_real_us(msg->base_real_us());
         span->set_received_us(msg->received_us());
         span->set_response_size(msg->payload.length());
@@ -360,7 +388,7 @@ void ProcessNsheadResponse(InputMessageBase* msg_base) {
     // MUST be NsheadMessage (checked in SerializeNsheadRequest)
     NsheadMessage* response = (NsheadMessage*)cntl->response();
     const int saved_error = cntl->ErrorCode();
-    if (response != NULL) {
+    if (response != nullptr) {
         msg->meta.copy_to(&response->head, sizeof(nshead_t));
         msg->payload.swap(response->body);
     } // else just ignore the response.
@@ -382,13 +410,13 @@ bool VerifyNsheadRequest(const InputMessageBase* msg_base) {
 
 void SerializeNsheadRequest(butil::IOBuf* request_buf, Controller* cntl,
                             const google::protobuf::Message* req_base) {
-    if (req_base == NULL) {
+    if (req_base == nullptr) {
         return cntl->SetFailed(EREQUEST, "request is NULL");
     }
     if (req_base->GetDescriptor() != NsheadMessage::descriptor()) {
         return cntl->SetFailed(EINVAL, "Type of request must be NsheadMessage");
     }
-    if (cntl->response() != NULL &&
+    if (cntl->response() != nullptr &&
         cntl->response()->GetDescriptor() != NsheadMessage::descriptor()) {
         return cntl->SetFailed(EINVAL, "Type of response must be NsheadMessage");
     }
@@ -420,8 +448,7 @@ void PackNsheadRequest(
     // pack the field.
     accessor.get_sending_socket()->set_correlation_id(correlation_id);
 
-    Span* span = accessor.span();
-    if (span) {
+    if (auto span = accessor.span()) {
         span->set_request_size(request.length());
         // TODO: Nowhere to set tracing ids.
         // request_meta->set_trace_id(span->trace_id());

@@ -16,6 +16,7 @@ brpc depends on following packages:
 * [Fedora/CentOS](#fedoracentos)
 * [Linux with self-built deps](#linux-with-self-built-deps)
 * [MacOS](#macos)
+* [Docker](#docker)
 
 ## Ubuntu/LinuxMint/WSL
 ### Prepare deps
@@ -37,7 +38,7 @@ sudo apt-get install -y libgoogle-perftools-dev
 
 If you need to run tests, install and compile libgtest-dev (which is not compiled yet):
 ```shell
-sudo apt-get install -y cmake libgtest-dev && cd /usr/src/gtest && sudo cmake . && sudo make && sudo mv libgtest* /usr/lib/ && cd -
+sudo apt-get install -y cmake libgtest-dev && cd /usr/src/gtest && sudo cmake . && sudo make && sudo mv lib/libgtest* /usr/lib/ && cd -
 ```
 The directory of gtest source code may be changed, try `/usr/src/googletest/googletest` if `/usr/src/gtest` is not there.
 
@@ -93,9 +94,19 @@ To enable [thrift support](../en/thrift.md), install thrift first and cmake with
 
 **Run example with cmake**
 
+Install brpc from the repository root first. CMake installs headers and
+libraries directly; it no longer stages headers in `output/include` during
+the build. Set the installation prefix during configuration so that generated
+pkg-config metadata uses the same prefix, then pass it to the example:
+
 ```shell
+$ cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$PWD/build/output"
+$ cmake --build build -j6
+$ cmake --install build
 $ cd example/echo_c++
-$ cmake -B build && cmake --build build -j4
+$ cmake -B build -DCMAKE_PREFIX_PATH="$PWD/../../build/output"
+$ cmake --build build -j4
+$ cd build
 $ ./echo_server &
 $ ./echo_client
 ```
@@ -105,6 +116,32 @@ Examples link brpc statically, if you need to link the shared version, remove `C
 
 ```shell
 $ mkdir build && cd build && cmake -DBUILD_UNIT_TESTS=ON .. && make && make test
+```
+
+### Compile brpc with Bazel
+
+bRPC also supports Bazel builds. The bzlmod example under
+`example/build_with_bazel_module` builds a server and a client against the local
+bRPC checkout:
+
+```shell
+$ cd example/build_with_bazel_module
+$ bazel build //:echo_c++_server //:echo_c++_client
+```
+
+For using bRPC as a Bazel dependency, including the required registries and
+`MODULE.bazel` setup, see [Bazel support](bazel_support.md).
+
+### Compile brpc with vcpkg
+
+[vcpkg](https://github.com/microsoft/vcpkg) is a package manager that supports all platforms,
+you can use vcpkg to build brpc with the following step:
+
+```shell
+$ git clone https://github.com/microsoft/vcpkg.git
+$ ./bootstrap-vcpkg.bat # for powershell
+$ ./bootstrap-vcpkg.sh # for bash
+$ ./vcpkg install brpc
 ```
 
 ## Fedora/CentOS
@@ -225,11 +262,25 @@ Note: With same environment, the performance of the MacOS version is worse than 
 
 The code at master HEAD already supports M1 series chips. M2 series are not tested yet. Please feel free to report remaining warnings/errors to us by issues.
 
+## Docker
+Compile brpc with docker:
+
+```shell
+$ mkdir -p ~/brpc
+$ cd ~/brpc
+$ git clone https://github.com/apache/brpc.git
+$ cd brpc
+$ docker build -t brpc:master .
+$ docker images
+$ docker run -it brpc:master /bin/bash
+```
+
 ### Prepare deps
 
 Install dependencies:
 ```shell
-brew install openssl git gnu-getopt coreutils gflags protobuf leveldb
+brew install ./homebrew-formula/protobuf.rb
+brew install openssl git gnu-getopt coreutils gflags leveldb
 ```
 
 If you need to enable cpu/heap profilers in examples:
@@ -239,7 +290,7 @@ brew install gperftools
 
 If you need to run tests, googletest is required. Run `brew install googletest` first to see if it works. If not (old homebrew does not have googletest), you can download and compile googletest by your own:
 ```shell
-git clone https://github.com/google/googletest -b release-1.10.0 && cd googletest/googletest && mkdir build && cd build && cmake -DCMAKE_CXX_FLAGS="-std=c++11" .. && make
+git clone https://github.com/google/googletest -b release-1.10.0 && cd googletest/googletest && mkdir build && cd build && cmake -DCMAKE_CXX_FLAGS="-std=c++14" .. && make
 ```
 After the compilation, copy `include/` and `lib/` into `/usr/local/include` and `/usr/local/lib` respectively to expose gtest to all apps
 
@@ -247,8 +298,47 @@ After the compilation, copy `include/` and `lib/` into `/usr/local/include` and 
 
 openssl installed in Monterey may not be found at `/usr/local/opt/openssl`, instead it's probably put under `/opt/homebrew/Cellar`. If the compiler cannot find openssl：
 
-* Run `brew link openssl --force` first and check if `/user/local/opt/openssl` appears.
+* Run `brew link openssl --force` first and check if `/usr/local/opt/openssl` appears.
 * If above command does not work, consider making a soft link using `sudo ln -s /opt/homebrew/Cellar/openssl@3/3.0.3 /usr/local/opt/openssl`. Note that the installed openssl in above command may be put in different places in different environments, which could be revealed by running `brew info openssl`.
+
+### Compile a Debug build with CMake
+
+Apple Silicon can build the Debug configuration against dependencies installed by Homebrew:
+
+```shell
+cmake -S . -B build -G "Unix Makefiles" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DDEBUG=ON \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+  -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+cmake --build build --parallel
+```
+
+The command uses the single-config Unix Makefiles generator, so
+`CMAKE_BUILD_TYPE=Debug` selects CMake's Debug configuration. `DEBUG=ON`
+enables brpc's debug logs and keeps assertions enabled. Build artifacts are
+written to `build/output/`.
+
+To generate a compilation database for tools such as clangd, add the following
+optional argument to the configuration command:
+
+```shell
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+```
+
+The compilation database is generated at `build/compile_commands.json`.
+
+If CMake reports `tapi error: malformed file`, make sure the Command Line Tools
+and Xcode versions match, then select the installed Xcode:
+
+```shell
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+```
+
+If the problem persists, verify that `xcrun --sdk macosx --show-sdk-path` returns
+a valid SDK path.
 
 ### Compile brpc with config_brpc.sh
 git clone brpc, cd into the repo and run
@@ -293,15 +383,19 @@ Same with [here](#compile-brpc-with-cmake)
 
 # Supported deps
 
-## GCC: 4.8-7.1
+## GCC: 5.0-11.2
 
-c++11 is turned on by default to remove dependencies on boost (atomic).
+**Prefer GCC 8.2+**
+
+c++14 is turned on by default to remove dependencies on boost (atomic).
+
+For butil ownership transfers, see [Migrating to C++14 move semantics](cpp14_move.md).
 
 The over-aligned issues in GCC7 is suppressed temporarily now.
 
 Using other versions of gcc may generate warnings, contact us to fix.
 
-Adding `-D__const__=` to cxxflags in your makefiles is a must to avoid [errno issue in gcc4+](thread_local.md).
+Adding `-D__const__=__unused__` to cxxflags in your makefiles is a must to avoid [errno issue in gcc4+](thread_local.md).
 
 ## Clang: 3.5-4.0
 
@@ -311,17 +405,16 @@ no known issues.
 
 no known issues.
 
-## protobuf: 2.4+
+## protobuf: 3.0-5.29
 
-Be compatible with pb 3.x and pb 2.x with the same file:
-Don't use new types in proto3 and start the proto file with `syntax="proto2";`
-[tools/add_syntax_equal_proto2_to_all.sh](https://github.com/brpc/brpc/blob/master/tools/add_syntax_equal_proto2_to_all.sh)can add `syntax="proto2"` to all proto files without it.
+bRPC uses some protobuf internal APIs, which may be changed upstream.
+Please [submit issue](https://github.com/apache/brpc/issues) if you have any problem.
 
-Arena in pb 3.x is not supported yet.
+[#2406](https://github.com/apache/brpc/pull/2406) and [#2493](https://github.com/apache/brpc/pull/2493) in [version 1.8.0]((https://github.com/apache/brpc/releases/tag/1.8.0)) introduce some proto3 syntax, so currently bRPC is no longer compatible with pb 2.x version. If you want to use pb 2.x version, you can use bRPC version before 1.8.0.
 
-## gflags: 2.0-2.2.1
+## gflags: 2.0-2.2.2
 
-no known issues.
+[gflags patch](https://github.com/gflags/gflags/commit/408061b46974cc8377a8a794a048ecae359ad887) is required when compiled with 2.1.1.
 
 ## openssl: 0.97-1.1
 
@@ -347,7 +440,7 @@ When you remove tcmalloc, not only remove the linkage with tcmalloc but also the
 
 ## glog: 3.3+
 
-brpc implements a default [logging utility](../../src/butil/logging.h) which conflicts with glog. To replace this with glog, add *--with-glog* to config_brpc.sh or add `-DWITH_GLOG=ON` to cmake.
+brpc implements a default [logging utility](../../src/butil/logging.h) which conflicts with glog. To replace this with glog, add `--with-glog` to config_brpc.sh or add `-DWITH_GLOG=ON` to cmake.
 
 ## valgrind: 3.8+
 
@@ -355,8 +448,18 @@ brpc detects valgrind automatically (and registers stacks of bthread). Older val
 
 ## thrift: 0.9.3-0.11.0
 
+## libunwind: 1.3-1.8.1
+
+brpc does **not** link [libunwind](https://github.com/libunwind/libunwind) by default. Users link libunwind on-demand by adding `--with-bthread-tracer` to config_brpc.sh or adding `-DWITH_BTHREAD_TRACER=ON` to cmake, if building with Bazel, please add the `--define with_bthread_tracer=true` option.
+
+It is recommended to use the latest possible version of libunwind.
+
 no known issues.
+
+## flatbuffers: 25.2.10
+
+Optional and disabled by default. bRPC uses FlatBuffers builder internals, so only this version is accepted; see [FlatBuffers messages](flatbuffers.md) for using another version.
 
 # Track instances
 
-We provide a program to help you to track and monitor all brpc instances. Just run [trackme_server](https://github.com/brpc/brpc/tree/master/tools/trackme_server/) somewhere and launch need-to-be-tracked instances with -trackme_server=SERVER. The trackme_server will receive pings from instances periodically and print logs when it does. You can aggregate instance addresses from the log and call builtin services of the instances for further information.
+We provide a program to help you to track and monitor all brpc instances. Just run [trackme_server](https://github.com/apache/brpc/tree/master/tools/trackme_server/) somewhere and launch need-to-be-tracked instances with -trackme_server=SERVER. The trackme_server will receive pings from instances periodically and print logs when it does. You can aggregate instance addresses from the log and call builtin services of the instances for further information.

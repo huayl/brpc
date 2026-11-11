@@ -18,8 +18,12 @@
 #include <google/protobuf/descriptor.h>         // MethodDescriptor
 #include <google/protobuf/message.h>            // Message
 #include <gflags/gflags.h>
-#include "butil/time.h" 
+
 #include "butil/iobuf.h"                         // butil::IOBuf
+#include "butil/object_pool.h"
+#include "butil/strings/string_util.h"
+#include "butil/time.h"
+
 #include "brpc/controller.h"               // Controller
 #include "brpc/socket.h"                   // Socket
 #include "brpc/server.h"                   // Server
@@ -28,7 +32,6 @@
 #include "brpc/details/server_private_accessor.h"
 #include "brpc/details/controller_private_accessor.h"
 #include "brpc/mongo_service_adaptor.h"
-#include "brpc/policy/most_common_message.h"
 #include "brpc/policy/nshead_protocol.h"
 #include "brpc/policy/mongo.pb.h"
 #include "brpc/details/usercode_backup_pool.h"
@@ -43,7 +46,7 @@ namespace policy {
 
 struct SendMongoResponse : public google::protobuf::Closure {
     SendMongoResponse(const Server *server) :
-        status(NULL),
+        status(nullptr),
         received_us(0L),
         server(server) {}
     ~SendMongoResponse();
@@ -107,18 +110,47 @@ void SendMongoResponse::Run() {
     }
 }
 
+// A mongo request and the context of its connection. The context is
+// referenced when the request is cut, because the bthread parsing messages
+// may reset the parsing context of the socket before the request is
+// processed in another bthread.
+struct MongoInputMessage : public InputMessageBase {
+    butil::IOBuf meta;
+    butil::IOBuf payload;
+    butil::intrusive_ptr<MongoContext> context;
+
+    inline static MongoInputMessage* Get() {
+        return butil::get_object<MongoInputMessage>();
+    }
+
+    // @InputMessageBase
+    void DestroyImpl() override {
+        meta.clear();
+        payload.clear();
+        context.reset();
+        butil::return_object(this);
+    }
+};
+
 ParseResult ParseMongoMessage(butil::IOBuf* source,
                               Socket* socket, bool /*read_eof*/, const void *arg) {
     const Server* server = static_cast<const Server*>(arg);
+    // arg may be nullptr when the parser is invoked outside of a full Server
+    // context (e.g. during protocol probing or fuzz testing).  Without this
+    // guard, server->options() dereferences a null pointer and crashes.
+    if (nullptr == server) {
+        LOG(FATAL) << "Failed creating server";
+        return MakeParseError(PARSE_ERROR_TRY_OTHERS);
+    }
     const MongoServiceAdaptor* adaptor = server->options().mongo_service_adaptor;
-    if (NULL == adaptor) {
+    if (nullptr == adaptor) {
         // The server does not enable mongo adaptor.
         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
     }
 
     char buf[sizeof(mongo_head_t)];
     const char *p = (const char *)source->fetch(buf, sizeof(buf));
-    if (NULL == p) {
+    if (nullptr == p) {
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
     mongo_head_t header = *(const mongo_head_t*)p;
@@ -138,27 +170,43 @@ ParseResult ParseMongoMessage(butil::IOBuf* source,
         return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
     }
     // Mongo protocol is a protocol with state. Each connection has its own
-    // mongo context. (e.g. last error occured on the connection, the cursor
+    // mongo context. (e.g. last error occurred on the connection, the cursor
     // created by the last Query). The context is stored in
     // socket::_input_message, and created at the first time when msg
     // comes over the socket.
     Destroyable *socket_context_msg = socket->parsing_context();
-    if (NULL == socket_context_msg) {
+    if (nullptr == socket_context_msg) {
         MongoContext *context = adaptor->CreateSocketContext();
-        if (NULL == context) {
+        if (nullptr == context) {
             return MakeParseError(PARSE_ERROR_NO_RESOURCE);
         }
         socket_context_msg = new MongoContextMessage(context);
         socket->reset_parsing_context(socket_context_msg);
     }
-    policy::MostCommonMessage* msg = policy::MostCommonMessage::Get();
+    MongoInputMessage* msg = MongoInputMessage::Get();
     source->cutn(&msg->meta, sizeof(buf));
     size_t act_body_len = source->cutn(&msg->payload, body_len - sizeof(buf));
     if (act_body_len != body_len - sizeof(buf)) {
         CHECK(false);     // Very unlikely, unless memory is corrupted.
         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
     }
+    MongoContextMessage* context_msg =
+        dynamic_cast<MongoContextMessage*>(socket_context_msg);
+    if (nullptr != context_msg) {
+        msg->context = context_msg->context();
+    }
     return MakeMessage(msg);
+}
+
+bool VerifyMongoRequest(const InputMessageBase* msg_base) {
+    Server* server = (Server*)msg_base->arg();
+    if (server->options().auth) {
+        // The mongo protocol carries no credential that ServerOptions.auth
+        // could verify.
+        LOG(WARNING) << "mongo does not support authentication";
+        return false;
+    }
+    return true;
 }
 
 // Defined in baidu_rpc_protocol.cpp
@@ -171,7 +219,7 @@ void EndRunningCallMethodInPool(
     ::google::protobuf::Closure* done);
 
 void ProcessMongoRequest(InputMessageBase* msg_base) {
-    DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
+    DestroyingPtr<MongoInputMessage> msg(static_cast<MongoInputMessage*>(msg_base));
     SocketUniquePtr socket_guard(msg->ReleaseSocket());
     Socket* socket = socket_guard.get();
     const Server* server = static_cast<const Server*>(msg_base->arg());
@@ -187,23 +235,26 @@ void ProcessMongoRequest(InputMessageBase* msg_base) {
                      << " of MongoService should be equal to 1!";
     }
 
-    const Server::MethodProperty *mp =
-            ServerPrivateAccessor(server)
-            .FindMethodPropertyByFullName(srv_des->method(0)->full_name());
+    ServerPrivateAccessor server_accessor(server);
+    const Server::MethodProperty *mp = server_accessor.FindMethodPropertyByFullName(
+        srv_des->method(0)->full_name());
 
-    MongoContextMessage *context_msg =
-        dynamic_cast<MongoContextMessage*>(socket->parsing_context());
-    if (NULL == context_msg) {
+    if (nullptr == msg->context) {
         LOG(WARNING) << "socket context wasn't set correctly";
         return;
     }
 
     SendMongoResponse* mongo_done = new SendMongoResponse(server);
-    mongo_done->cntl.set_mongo_session_data(context_msg->context());
+    // set_mongo_session_data() stores the pointer into a
+    // butil::intrusive_ptr, which takes its own reference. The controller
+    // therefore keeps the context alive after this message is destroyed.
+    mongo_done->cntl.set_mongo_session_data(msg->context.get());
 
     ControllerPrivateAccessor accessor(&(mongo_done->cntl));
+    const bool security_mode = server->options().security_mode() &&
+                               socket->user() == server_accessor.acceptor();
     accessor.set_server(server)
-        .set_security_mode(server->options().security_mode())
+        .set_security_mode(security_mode)
         .set_peer_id(socket->id())
         .set_remote_side(socket->remote_side())
         .set_local_side(socket->local_side())
@@ -223,7 +274,7 @@ void ProcessMongoRequest(InputMessageBase* msg_base) {
             break;
         }
 
-        if (!ServerPrivateAccessor(server).AddConcurrency(&(mongo_done->cntl))) {
+        if (!server_accessor.AddConcurrency(&(mongo_done->cntl))) {
             mongo_done->cntl.SetFailed(
                 ELIMIT, "Reached server's max_concurrency=%d",
                 server->options().max_concurrency);
@@ -235,9 +286,12 @@ void ProcessMongoRequest(InputMessageBase* msg_base) {
             break;
         }
 
-        if (NULL == mp ||
+        if (nullptr == mp ||
             mp->service->GetDescriptor() == BadMethodService::descriptor()) {
             mongo_done->cntl.SetFailed(ENOMETHOD, "Fail to find default_method");
+            break;
+        }
+        if (RejectNonBuiltinAccessFromInternalPort(&mongo_done->cntl, *server, mp)) {
             break;
         }
         // Switch to service-specific error.
@@ -249,7 +303,7 @@ void ProcessMongoRequest(InputMessageBase* msg_base) {
             if (!method_status->OnRequested(&rejected_cc)) {
                 mongo_done->cntl.SetFailed(
                     ELIMIT, "Rejected by %s's ConcurrencyLimiter, concurrency=%d",
-                    mp->method->full_name().c_str(), rejected_cc);
+                    butil::EnsureString(mp->method->full_name()).c_str(), rejected_cc);
                 break;
             }
         }

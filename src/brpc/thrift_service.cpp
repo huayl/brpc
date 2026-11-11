@@ -23,13 +23,12 @@
 namespace brpc {
 
 ThriftService::ThriftService() {
-    _status = new (std::nothrow) MethodStatus;
-    LOG_IF(FATAL, _status == NULL) << "Fail to new MethodStatus";
+    _status = new MethodStatus;
 }
 
 ThriftService::~ThriftService() {
     delete _status;
-    _status = NULL;
+    _status = nullptr;
 }
 
 void ThriftService::Describe(std::ostream &os, const DescribeOptions&) const {
@@ -37,7 +36,7 @@ void ThriftService::Describe(std::ostream &os, const DescribeOptions&) const {
 }
 
 void ThriftService::Expose(const butil::StringPiece& prefix) {
-    if (_status == NULL) {
+    if (_status == nullptr) {
         return;
     }
     std::string s;

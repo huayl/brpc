@@ -61,13 +61,18 @@ int RemoteFileNamingService::GetServers(const char *service_name_cstr,
                                       std::vector<ServerNode>* servers) {
     servers->clear();
 
-    if (_channel == NULL) {
+    if (_channel == nullptr) {
         butil::StringPiece tmpname(service_name_cstr);
         size_t pos = tmpname.find("://");
         butil::StringPiece proto;
         if (pos != butil::StringPiece::npos) {
             proto = tmpname.substr(0, pos);
-            for (pos += 3; tmpname[pos] == '/'; ++pos) {}
+            for (pos += 3; pos < tmpname.size() && tmpname[pos] == '/'; ++pos) {}
+            if (pos == tmpname.size()) {
+                LOG(ERROR) << "No server address in service_name="
+                           << service_name_cstr;
+                return -1;
+            }
             tmpname.remove_prefix(pos);
         } else {
             proto = "http";
@@ -105,7 +110,7 @@ int RemoteFileNamingService::GetServers(const char *service_name_cstr,
 
     Controller cntl;
     cntl.http_request().uri() = _path;
-    _channel->CallMethod(NULL, &cntl, NULL, NULL, NULL);
+    _channel->CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
     if (cntl.Failed()) {
         LOG(WARNING) << "Fail to access " << _server_addr << _path << ": "
                      << cntl.ErrorText();

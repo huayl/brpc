@@ -146,6 +146,8 @@ private:
     // by calling CopyFrom[Different|Same]Arena.
     DISALLOW_COPY_AND_ASSIGN(RedisReply);
 
+    ParseError ConsumePartialIOBuf(butil::IOBuf& buf, int depth,
+                                    uint32_t* used_bytes);
     void FormatStringImpl(const char* fmt, va_list args, RedisReplyType type);
     void SetStringImpl(const butil::StringPiece& str, RedisReplyType type);
     
@@ -157,6 +159,10 @@ private:
         const char* long_str;
         struct {
             int32_t last_index;  // >= 0 if previous parsing suspends on replies.
+            // Arena bytes charged to -redis_max_allocation_size by the reply
+            // tree so far. Only read/written on the root array of a reply
+            // whose parsing was suspended, to keep the budget across resumes.
+            uint32_t used_bytes;
             RedisReply* replies;
         } array;
         uint64_t padding[2]; // For swapping, must cover all bytes.
@@ -175,7 +181,8 @@ inline void RedisReply::Reset() {
     _type = REDIS_REPLY_NIL;
     _length = 0;
     _data.array.last_index = -1;
-    _data.array.replies = NULL;
+    _data.array.used_bytes = 0;
+    _data.array.replies = nullptr;
     // _arena should not be reset because further memory allocation needs it.
 }
 
@@ -309,7 +316,7 @@ inline const RedisReply& RedisReply::operator[](size_t index) const {
     if (is_array() && index < (size_t)_length) {
         return _data.array.replies[index];
     }
-    static RedisReply redis_nil(NULL);
+    static RedisReply redis_nil(nullptr);
     return redis_nil;
 }
 
@@ -318,7 +325,8 @@ inline void RedisReply::Swap(RedisReply& other) {
     std::swap(_length, other._length);
     std::swap(_data.padding[0], other._data.padding[0]);
     std::swap(_data.padding[1], other._data.padding[1]);
-    std::swap(_arena, other._arena);
+    // reply _arena should not be swapped because _arena point to address in redisresponse.
+    // std::swap(_arena, other._arena);
 }
 
 inline void RedisReply::CopyFromSameArena(const RedisReply& other) {

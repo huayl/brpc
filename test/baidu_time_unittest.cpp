@@ -89,7 +89,7 @@ TEST(BaiduTimeTest, cost_of_timer) {
 
     t1.start();
     for (size_t i = 0; i < N; ++i) {
-        time(NULL);
+        time(nullptr);
     }
     t1.stop();
     printf("time(NULL) takes %" PRId64 "ns\n", t1.n_elapsed() / N);
@@ -99,7 +99,7 @@ TEST(BaiduTimeTest, cost_of_timer) {
         s += butil::monotonic_time_ns();
     }
     t1.stop();
-    printf("monotonic_time_ns takes %" PRId64 "ns\n", t1.n_elapsed() / N);
+    printf("monotonic_time_ns takes %" PRId64 "ns s=%ld\n", t1.n_elapsed() / N, s);
 
     for (size_t i = 0; i < arraysize(clock_desc); ++i) {
 #if defined(OS_LINUX)
